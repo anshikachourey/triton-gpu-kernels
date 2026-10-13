@@ -1,0 +1,4 @@
+# Diagnostic artifacts (hardware_diagnostics.json, numerical_diagnostics.json,
+# cross_config_equality.json, *.ptx/*.ttgir, cuobjdump outputs) are written here
+# by the Colab diagnostic cells. This placeholder keeps the directory tracked.
+# These are SEPARATE from the top-level results/ files, which are preserved.

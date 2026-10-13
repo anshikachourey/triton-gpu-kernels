@@ -69,9 +69,15 @@ reinstalls or downgrades torch/triton.
 
 ### Measured correctness result (preserved as observed)
 
-- **24 / 30** shape×config combinations passed the **FP16-reference** criterion;
-  **6 failed** — all six configs on the `1000×1500×700` case. **0** compilation
-  or runtime errors.
+- **Configuration-level:** **24 / 30** shape×config combinations passed the
+  **FP16-reference** criterion; **6 failed** — all six configs on the
+  `1000×1500×700` case. **0** compilation or runtime errors.
+- **Shape-level:** of the **5 distinct shapes**, **4 / 5** passed on every
+  config (`256³`, `512³`, `64×128×96`, `130×70×50`); **1 / 5** (`1000×1500×700`)
+  failed the FP16-reference criterion on all six configs. The 24/30
+  configuration-level count and the 4/5 shape-level count describe the same
+  result at different granularities and are **not** interchangeable: the 6
+  failures are 6 configs of one shape, not 6 independent shape failures.
 - Investigation of the failing case (measured, not assumed): 79 violating
   elements out of 1,500,000 (0.0053%); **79 of 79** overlapped elements where
   PyTorch's own FP16 and FP32 references disagree; violation densities were
@@ -118,17 +124,30 @@ Benchmark sizes: `512³`, `1024³`, `2048³`, `4096³`, `1000×1500×700`.
 
 ## Measured results (first experimental run)
 
-Observed on the Tesla T4 (see `results/benchmarks.csv` for the full table):
+Observed on the Tesla T4 (all values read from `results/benchmarks.csv`,
+first-run `latency_ms_primary_median`):
 
 - All 30 Triton configurations executed with **no resource or compilation
   errors**.
 - The **64×64×32, 8-warps** configuration was the fastest custom config across
-  all five workloads.
-- `1024³`: 4→8 warps reduced custom latency from **1.4652 ms → 0.6836 ms**
-  (~2.14×).
-- `4096³`: 4→8 warps reduced latency from **105.468 ms → 51.476 ms** (~2.05×).
+  all five workloads (512³: 0.0942 ms; 1024³: 0.6976 ms; 2048³: 6.2935 ms;
+  4096³: 51.882 ms; `1000×1500×700`: 0.6927 ms).
+- `1024³`, 64×64 tile: 4→8 warps reduced custom median latency from
+  **1.4655 ms → 0.6976 ms** (ratio **≈ 2.10×**).
+- `4096³`, 64×64 tile: 4→8 warps reduced median latency from
+  **104.436 ms → 51.882 ms** (ratio **≈ 2.01×**).
 - **All custom configurations remained slower than PyTorch** on every workload.
-- The **128×128** configurations showed unexpectedly severe regressions.
+  The best custom standing vs PyTorch was `speedup_vs_torch ≈ 0.195`
+  (`1000×1500×700`, 64×64/8-warp), i.e. about **5× slower** than PyTorch; the
+  512³ 64×64/4-warp case was `≈ 0.073` (about 14× slower).
+- The **128×128** configurations showed unexpectedly severe regressions
+  (e.g. `4096³` 128×128/4-warp: **2552.76 ms**, ~49× slower than the same-shape
+  64×64/4-warp custom config).
+
+> **Reading `speedup_vs_torch`:** it is defined as
+> `torch_median / triton_median` (PyTorch latency divided by Triton latency).
+> A value **< 1 means the custom Triton kernel is slower** than PyTorch; **> 1**
+> would mean faster. Every measured value is < 1.
 
 Plots (generated from the measured CSV only):
 - `results/latency_comparison.png` — median latency, fastest custom config vs
@@ -138,36 +157,92 @@ Plots (generated from the measured CSV only):
 - `results/config_speedup.png` — **custom-vs-custom** config-level speedup
   (64×64, 8-warp vs 4-warp); explicitly not a comparison against PyTorch.
 
-### Verified repeatability (second run, separate file)
+### Repeatability (second run, separate file)
 
-A targeted, repeatable comparison of the 64×64×32 tile at 4 vs 8 warps on
-`1024³` and `4096³` (`results/benchmarks_repeat.csv`) **confirmed** the
-configuration-level speedup: on `4096³`, 8 warps was approximately **2.0× lower
-latency** than 4 warps, consistent with the first run. The repeat run records
-both the primary median and the quantile-run p50 per repeat; small differences
-between them are expected because they come from two separate `do_bench`
-invocations, not from a measurement error.
+A targeted comparison of the 64×64×32 tile at 4 vs 8 warps on `1024³` and
+`4096³` was repeated 5 times each (`results/benchmarks_repeat.csv`). The
+8-vs-4-warp latency ratio was reproducible: on `4096³`, mean 4-warp
+≈ **101.76 ms** vs mean 8-warp ≈ **50.70 ms**, a raw ratio of **≈ 2.01×**,
+consistent with the first run. Within each config the run-to-run spread was
+small (4-warp 101.66–101.87 ms; 8-warp 50.40–51.28 ms).
 
-### GPU clock / thermal observation
+The repeat run records both the primary median and the quantile-run p50 per
+repeat; small `median_minus_p50_ms` differences are expected because the two
+come from separate `do_bench` invocations.
 
-GPU-state snapshots (SM/memory clock, temperature) were captured before and
-after each timed region to check whether configurations were inadvertently
-measured under different GPU conditions. The repeatability of the 4-vs-8-warp
-ratio across independent runs indicates the observed speedup is a real
-configuration effect, not an artifact of clock or thermal drift. (Where a
-specific clock/temperature field is not exposed by the installed driver, it is
-reported as unavailable rather than guessed.)
+### GPU clock / thermal observation (corrects an earlier claim)
+
+The repeat CSV shows the two configs **did not run at the same GPU clock**, and
+the runs were **not interleaved** (all 4-warp repeats first, then all 8-warp
+repeats). Observed SM clocks:
+
+- `1024³`: 4-warp ≈ 1245–1260 MHz; 8-warp ≈ 1395–1410 MHz.
+- `4096³`: 4-warp ≈ 900–945 MHz; 8-warp ≈ 1050–1140 MHz.
+- Temperature rose monotonically across the session (72 °C → 77 °C).
+
+An earlier version of this README claimed the warp-count speedup was independent
+of clock/thermal changes. **That claim was incorrect** and is retracted: because
+the 8-warp config ran at a higher clock and later in a warming session, the raw
+~2.0× ratio **conflates** the warp-count effect with a clock-frequency
+difference.
+
+#### Approximate clock-normalized comparison (explicitly labeled, not controlled)
+
+To estimate how much of the speedup survives after removing the clock
+difference, we use a simple proxy: *work ∝ latency × clock* (a config running at
+a higher clock does proportionally more cycles in the same wall-clock time).
+Dividing out each config's own mean clock gives a clock-invariant estimate.
+
+For `4096³`, 64×64 (means over 5 repeats; clock = mean of the before/after
+readings):
+
+| config | mean latency (ms) | mean SM clock (MHz) | latency × clock (proxy) |
+|--------|------------------:|--------------------:|------------------------:|
+| 4-warp | 101.76 | ≈ 933 | ≈ 94,942 |
+| 8-warp | 50.70 | ≈ 1082 | ≈ 54,857 |
+
+- **Raw wall-clock ratio:** ≈ **2.01×**.
+- **Approximate clock-normalized ratio:** 94,942 / 54,857 ≈ **1.73×**.
+
+So an estimated ~1.7× of the improvement plausibly comes from the warp-count
+change itself, with the remainder attributable to the higher clock the 8-warp
+run happened to receive.
+
+**Method and limitations (important):** this is a back-of-envelope normalization,
+**not** a controlled clock-independent measurement. (1) The clocks were sampled
+*before* and *after* the timed region, not continuously *during* it, so the mean
+is approximate. (2) The runs were not interleaved and temperature drifted, so
+clock and thermal effects are confounded with ordering. (3) The `latency × clock`
+proxy assumes latency scales inversely with clock, which holds only for
+compute-bound, clock-sensitive work and ignores memory-bound components. A
+properly controlled comparison would **lock the SM clock**
+(`nvidia-smi --lock-gpu-clocks`) and **interleave** the configs; we have not done
+that here, so the ~1.73× figure is an estimate to be treated as a hypothesis,
+not a verified result.
+
+### Quantile ties and limited samples (noted)
+
+In `results/benchmarks.csv`, several of the **slow** configurations report
+**identical p20 = p50 = p80** values (e.g. `2048³` and `4096³` 128×128 rows, and
+some 128×64 rows). This indicates `do_bench` collected very few timed iterations
+for those long-running kernels, so the quantiles collapse onto a single
+sample rather than reflecting a real distribution. These quantiles should be
+read as low-sample point estimates, not characterized spreads.
 
 ### Two distinct comparisons (kept separate)
 
 - **Custom-vs-custom (optimization relative to my 4-warp baseline):** switching
-  the 64×64 tile from 4 → 8 warps gave ~2.14× (`1024³`) and ~2.05× (`4096³`)
-  lower latency. This is a genuine improvement **of my kernel over my own
-  baseline** and is plotted in `results/config_speedup.png`.
+  the 64×64 tile from 4 → 8 warps gave a raw **≈ 2.10×** (`1024³`,
+  1.4655→0.6976 ms) and **≈ 2.01×** (`4096³`, 104.436→51.882 ms) lower median
+  latency (first-run `benchmarks.csv`). This is an improvement **of my kernel
+  over my own 4-warp baseline** and is plotted in `results/config_speedup.png`.
+  Note the raw ratio includes a clock-frequency difference (see the
+  clock-normalized estimate above, ≈ 1.73× for `4096³`).
 - **Custom-vs-PyTorch (absolute standing):** even the fastest custom config
-  (64×64, 8 warps) remained **slower than PyTorch** on every workload. The
-  config-level speedup above does **not** change this; the two comparisons are
-  reported separately and never conflated.
+  (64×64, 8 warps) remained **slower than PyTorch** on every workload
+  (`speedup_vs_torch < 1` for every row). The config-level improvement above
+  does **not** change this; the two comparisons are reported separately and
+  never conflated.
 
 ### Interpretation vs hypothesis (kept separate)
 
@@ -188,6 +263,13 @@ reported as unavailable rather than guessed.)
 - FP16 inputs with FP32 accumulation balance speed and accuracy; the FP16
   *reference* itself is a source of relative-error noise near zero.
 - Results are specific to the Tesla T4 (CC 7.5) and the fixed `num_stages=2`.
+- **512³ latency variability (noted, not explained):** the `512³` first-run rows
+  show unusually wide quantile spread for some configs — e.g. 64×64/4-warp has
+  p20 = 0.1512 ms but a primary median of 0.3010 ms, and 64×64/8-warp has
+  primary median 0.0942 ms with p20 = p50 ≈ 0.094–0.096 ms. At this small size
+  the kernel runtime is close to launch/measurement overhead, so the medians are
+  noisier than at larger sizes. This is flagged as an observation; we do not yet
+  have a diagnosed cause.
 
 ## Reproduce in Google Colab
 
@@ -202,6 +284,15 @@ reported as unavailable rather than guessed.)
    `results/benchmarks_repeat.csv`.
 9. **Cell 9** — plots → `results/latency_comparison.png`,
    `results/throughput_comparison.png`, `results/config_speedup.png`.
+10. **Cell 10** — hardware diagnostics (read-only; direct `_matmul_kernel`
+    launch) → `results/diagnostics/`.
+11. **Cell 11** — numerical diagnostics (FP16 / FP16-no-reduce / FP64 references,
+    cross-config `torch.equal`) → `results/diagnostics/`.
+
+> Cells 10–11 are an investigation pass. They do not modify the kernel, the
+> `matmul()` wrapper, or any committed result file, and they draw **no**
+> conclusions about Tensor Core usage or the performance gap — those wait until
+> the actual Colab output is reviewed.
 
 Save artifacts off Colab's ephemeral runtime by downloading `results/` or
 committing to the repo. Only verified, observed results are committed — never
