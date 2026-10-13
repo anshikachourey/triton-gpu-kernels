@@ -85,12 +85,16 @@ reinstalls or downgrades torch/triton.
 - A targeted **FP32-reference** check of the full `1000×1500×700` output passed
   with **0 / 1,500,000** violations (max abs error 0.0442).
 
-**Interpretation (evidence-based, not proven):** the FP16-reference failures are
-most consistent with a precision artifact of PyTorch's FP16 `torch.matmul` on
-near-zero-magnitude outputs — the custom kernel tracks the FP32 (true-math)
-result, while the FP16 *reference* is the noisy operand in the relative-error
-denominator. We do **not** claim this isolates every source of numerical error,
-and we do **not** relabel the 24/30 FP16-reference result.
+**Interpretation (evidence-based, not proven):** follow-up experiments found
+that disabling PyTorch's `allow_fp16_reduced_precision_reduction` setting
+eliminated the tolerance violations against the FP64-derived reference on the
+tested `1000×1500×700` workload (0 violations with it disabled, vs the default
+behavior that produced the mismatches). This is evidence that **PyTorch's
+default reduced-precision reduction behavior contributes to the discrepancy**
+between the custom kernel's output and the FP16 `torch.matmul` reference. We do
+**not** claim to have established the exact internal cuBLAS arithmetic, and we do
+**not** relabel the 24/30 FP16-reference result. See the numerical investigation
+section below for the measured figures.
 
 ## Benchmark methodology
 
@@ -140,10 +144,12 @@ first-run `latency_ms_primary_median`):
   The best custom standing vs PyTorch was `speedup_vs_torch ≈ 0.195`
   (`1000×1500×700`, 64×64/8-warp), i.e. about **5× slower** than PyTorch; the
   512³ 64×64/4-warp case was `≈ 0.073` (about 14× slower).
-- The **128×128** configurations showed severe regressions (e.g. `4096³`
-  128×128/4-warp: **2552.76 ms**, ~49× slower than the same-shape 64×64/4-warp
-  custom config). Static disassembly later linked this to heavy register
-  spilling and local-memory traffic — see the hardware investigation section
+- The **128×128** configurations showed severe regressions. On `4096³`,
+  128×128/4-warp measured **2552.76 ms**; relative to the same-shape custom
+  baselines that is **≈ 24.4× slower than 64×64/4-warp** (104.44 ms) and
+  **≈ 49.2× slower than 64×64/8-warp** (51.88 ms). Static disassembly later
+  linked this to heavy register spilling and local-memory traffic — see the
+  hardware investigation section
   below (correlational, not a full causal measurement).
 
 > **Reading `speedup_vs_torch`:** it is defined as
@@ -316,17 +322,23 @@ pass/fail flags are not changed or reinterpreted.
 
 ### Conclusions (supported) and their limits
 
-- **Supported:** neither inspected compiled kernel contains Tensor Core matrix
-  instructions (SASS HMMA/IMMA = 0, no PTX/TTGIR MMA); both perform the multiply
-  with ordinary **FP32 FFMA** instructions.
+- **Supported (scoped):** the **two inspected configurations**, compiled with
+  **Triton 3.6.0 for the NVIDIA Tesla T4 (sm_75)**, contain **no HMMA/IMMA
+  Tensor Core matrix instructions** in their disassembly (SASS HMMA/IMMA = 0, no
+  PTX/TTGIR MMA matches); both perform the multiply with ordinary **FP32 FFMA**
+  instructions. This finding is specific to these two configs on this
+  Triton/arch combination and is **not** generalized to other Triton versions,
+  other Turing GPUs, or other possible Triton matmul implementations. The
+  precise reason for this lowering behavior has not been isolated, and we do not
+  speculate about it.
 - **Supported:** the 128×128/4-warp kernel shows **2,806 spills** and heavy
   local-memory traffic (**LDL 3,955 / STL 3,536**), **consistent with** its
   severe measured slowdown.
 - **Not claimed:** these static observations do **not** establish the complete
   quantitative cause of the gap versus PyTorch. We have not profiled runtime
   instruction issue, occupancy, or memory-stall cycles, and PyTorch's cuBLAS
-  path (which on the T4 can use Tensor Cores) was not disassembled. The spill
-  evidence is correlational with the slowdown, not a measured time breakdown.
+  path was not disassembled. The spill evidence is correlational with the
+  slowdown, not a measured time breakdown.
 
 ## Performance tradeoffs and limitations
 
@@ -363,9 +375,11 @@ pass/fail flags are not changed or reinterpreted.
     cross-config `torch.equal`) → `results/diagnostics/`.
 
 > Cells 10–11 are an investigation pass. They do not modify the kernel, the
-> `matmul()` wrapper, or any committed result file, and they draw **no**
-> conclusions about Tensor Core usage or the performance gap — those wait until
-> the actual Colab output is reviewed.
+> `matmul()` wrapper, or any committed result file. The diagnostic **code
+> itself** does not automatically infer a conclusion — it only emits the
+> compiled-kernel metadata and the PTX/TTGIR/SASS artifacts. The findings stated
+> in the investigation section above come from the **subsequent analysis** of
+> those generated artifacts, which supports them.
 
 Save artifacts off Colab's ephemeral runtime by downloading `results/` or
 committing to the repo. Only verified, observed results are committed — never
