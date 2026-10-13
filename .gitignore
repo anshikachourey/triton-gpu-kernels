@@ -1,0 +1,53 @@
+# ---- Python caches / bytecode ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ---- Packaging / build ----
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---- Environment & credentials (never commit secrets) ----
+.env
+.env.*
+*.pem
+*.key
+*.crt
+credentials
+.netrc
+*_rsa
+*_ed25519
+.aws/
+.ssh/
+
+# ---- Jupyter / IPython ----
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# ---- Tooling / editor ----
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# ---- Test / coverage caches ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Keep the results/ directory but ignore noisy local artifacts if desired ----
+# (Generated CSVs/PNGs are intentionally committed only when backed by real
+#  Colab output; nothing is auto-ignored here so verified results can be added.)

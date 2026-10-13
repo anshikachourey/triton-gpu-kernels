@@ -1,0 +1,13 @@
+# Confirmed, pre-installed Colab stack on the Tesla T4 (compute capability 7.5).
+# DO NOT reinstall or downgrade torch or triton — they are already present and
+# working in the target Colab environment. These lines document the versions
+# the project is built and verified against; they are not an instruction to
+# reinstall on Colab.
+#
+#   torch   == 2.11.0+cu130   (preinstalled on Colab — do not reinstall)
+#   triton  == 3.6.0          (preinstalled on Colab — do not reinstall)
+#   CUDA     : 13.0
+#
+# Only matplotlib may need installing (for the Phase 5 plots), and only if it
+# is not already available in the runtime.
+matplotlib
