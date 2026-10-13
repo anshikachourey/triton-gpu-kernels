@@ -1,0 +1,3 @@
+# CUDA WMMA diagnostic artifacts (cuda_correctness.json, cuda_performance.json,
+# cuobjdump SASS/res-usage) are written here by the Colab CUDA cells. Kept
+# separate from the Triton diagnostics and the original results/ files.

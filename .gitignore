@@ -4,6 +4,12 @@ __pycache__/
 *$py.class
 *.so
 
+# ---- Compiled CUDA build artifacts (rebuilt in Colab; do not commit) ----
+# Note: results/diagnostics/**/kernel.cubin are intentionally tracked diagnostic
+# artifacts and are force-added; this ignores stray build outputs under cuda/.
+cuda/*.so
+cuda/*.o
+
 # ---- Virtual environments ----
 .venv/
 venv/
