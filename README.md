@@ -130,20 +130,55 @@ Observed on the Tesla T4 (see `results/benchmarks.csv` for the full table):
 - **All custom configurations remained slower than PyTorch** on every workload.
 - The **128×128** configurations showed unexpectedly severe regressions.
 
-Plots: `results/latency_comparison.png`, `results/throughput_comparison.png`
-(generated from the measured CSV only).
+Plots (generated from the measured CSV only):
+- `results/latency_comparison.png` — median latency, fastest custom config vs
+  PyTorch (log-scale y-axis so `512³`…`4096³` are all legible).
+- `results/throughput_comparison.png` — effective TFLOPS, fastest custom config
+  vs PyTorch.
+- `results/config_speedup.png` — **custom-vs-custom** config-level speedup
+  (64×64, 8-warp vs 4-warp); explicitly not a comparison against PyTorch.
+
+### Verified repeatability (second run, separate file)
+
+A targeted, repeatable comparison of the 64×64×32 tile at 4 vs 8 warps on
+`1024³` and `4096³` (`results/benchmarks_repeat.csv`) **confirmed** the
+configuration-level speedup: on `4096³`, 8 warps was approximately **2.0× lower
+latency** than 4 warps, consistent with the first run. The repeat run records
+both the primary median and the quantile-run p50 per repeat; small differences
+between them are expected because they come from two separate `do_bench`
+invocations, not from a measurement error.
+
+### GPU clock / thermal observation
+
+GPU-state snapshots (SM/memory clock, temperature) were captured before and
+after each timed region to check whether configurations were inadvertently
+measured under different GPU conditions. The repeatability of the 4-vs-8-warp
+ratio across independent runs indicates the observed speedup is a real
+configuration effect, not an artifact of clock or thermal drift. (Where a
+specific clock/temperature field is not exposed by the installed driver, it is
+reported as unavailable rather than guessed.)
+
+### Two distinct comparisons (kept separate)
+
+- **Custom-vs-custom (optimization relative to my 4-warp baseline):** switching
+  the 64×64 tile from 4 → 8 warps gave ~2.14× (`1024³`) and ~2.05× (`4096³`)
+  lower latency. This is a genuine improvement **of my kernel over my own
+  baseline** and is plotted in `results/config_speedup.png`.
+- **Custom-vs-PyTorch (absolute standing):** even the fastest custom config
+  (64×64, 8 warps) remained **slower than PyTorch** on every workload. The
+  config-level speedup above does **not** change this; the two comparisons are
+  reported separately and never conflated.
 
 ### Interpretation vs hypothesis (kept separate)
 
 - **Measurement:** 8 warps beat 4 warps for the 64×64 tile on the large
-  workloads; PyTorch (cuBLAS-backed) was faster than every custom config.
-- **Hypothesis (not yet proven):** the 128×128 regression could relate to
-  occupancy / resource pressure on Turing, but this is **not** attributed to
-  register spilling without evidence. `kernel_resources()` reports register /
-  shared-memory / spill metadata where Triton exposes it so this can be examined
-  directly; `repeat_compare()` re-measures the 64×64 4-vs-8-warp result over
-  multiple runs with GPU clock/temperature snapshots to check repeatability and
-  rule out clock/thermal drift.
+  workloads; PyTorch (cuBLAS-backed) was faster than every custom config; the
+  128×128 configs regressed severely.
+- **Resource metadata:** on this Triton 3.6.0 / T4 build, the compiled-kernel
+  register / shared-memory / spill metadata was **unavailable** via the JIT
+  cache. Because of that, the 128×128 regression is **not** attributed to
+  register spilling or any specific resource cause — it remains an open,
+  unexplained observation rather than a diagnosed one.
 
 ## Performance tradeoffs and limitations
 
@@ -166,11 +201,30 @@ Plots: `results/latency_comparison.png`, `results/throughput_comparison.png`
 8. **Cell 8** — methodology review (resources, repeat comparison) →
    `results/benchmarks_repeat.csv`.
 9. **Cell 9** — plots → `results/latency_comparison.png`,
-   `results/throughput_comparison.png`.
+   `results/throughput_comparison.png`, `results/config_speedup.png`.
 
 Save artifacts off Colab's ephemeral runtime by downloading `results/` or
 committing to the repo. Only verified, observed results are committed — never
 fabricated or empty data.
+
+### Publishing the Colab-generated result files (without overwriting)
+
+The committed repo intentionally contains **no** fabricated result files; the
+measured CSVs/PNGs are produced in Colab and added separately. To add them to
+GitHub without clobbering anything, from a clean local clone copy the downloaded
+Colab artifacts into `results/`, then stage and commit only those files:
+
+```
+# after unzipping the Colab download into ./results
+git add results/correctness.csv results/benchmarks.csv \
+        results/benchmarks_repeat.csv results/latency_comparison.png \
+        results/throughput_comparison.png results/config_speedup.png
+git commit -m "Add measured T4 result files (observed Colab run)"
+git push origin main
+```
+
+Because these are new result files (not tracked before), the commit only adds
+them; existing code and docs are untouched.
 
 ## Attribution and differences from the Triton tutorial
 

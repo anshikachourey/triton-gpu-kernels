@@ -553,9 +553,14 @@ def _read_benchmarks_csv(path="results/benchmarks.csv"):
 
 
 def plot_latency(csv_path="results/benchmarks.csv",
-                 out_path="results/latency_comparison.png"):
+                 out_path="results/latency_comparison.png",
+                 log_y: bool = True):
     """Plot measured median latency (ms) per workload for the fastest custom
-    config vs PyTorch. Reads only observed CSV rows; nothing is fabricated."""
+    config vs PyTorch. Reads only observed CSV rows; nothing is fabricated.
+
+    `log_y=True` uses a logarithmic y-axis so the wide latency range (512^3 to
+    4096^3) is legible. The original measurements are unchanged; this only
+    changes the axis scale."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -593,8 +598,75 @@ def plot_latency(csv_path="results/benchmarks.csv",
     ax.bar([i + w / 2 for i in x], [t or 0 for t in torchv], w, label="PyTorch")
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels, rotation=30, ha="right")
-    ax.set_ylabel("median latency (ms)  — lower is better")
+    ylabel = "median latency (ms)  — lower is better"
+    if log_y:
+        ax.set_yscale("log")
+        ylabel += "  [log scale]"
+    ax.set_ylabel(ylabel)
     ax.set_title("Measured median latency: fastest Triton config vs PyTorch (T4)")
+    ax.legend()
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
+def plot_config_speedup(csv_path="results/benchmarks.csv",
+                        out_path="results/config_speedup.png",
+                        baseline_warps: int = 4, compare_warps: int = 8,
+                        block_m: int = 64, block_n: int = 64):
+    """Configuration-level speedup plot: for the 64x64 tile, how much faster the
+    `compare_warps` config is than the `baseline_warps` config, per workload.
+
+    This is the CUSTOM-vs-CUSTOM comparison (my 8-warp config relative to my
+    4-warp baseline) and is DISTINCT from any comparison against PyTorch. Reads
+    only measured rows; a workload is plotted only if both configs have an 'ok'
+    median. Nothing is fabricated.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = _read_benchmarks_csv(csv_path)
+    labels = []
+    for r in rows:
+        if r["label"] not in labels:
+            labels.append(r["label"])
+
+    def median_for(label, warps):
+        for r in rows:
+            if (r["label"] == label and r["impl"] == "triton_custom"
+                    and r["status"] == "ok"
+                    and int(r["block_m"]) == block_m
+                    and int(r["block_n"]) == block_n
+                    and int(r["num_warps"]) == warps
+                    and r["latency_ms_primary_median"] not in ("", "nan")):
+                return float(r["latency_ms_primary_median"])
+        return None
+
+    plot_labels, speedups = [], []
+    for lab in labels:
+        base = median_for(lab, baseline_warps)
+        comp = median_for(lab, compare_warps)
+        if base and comp and comp > 0:
+            plot_labels.append(lab)
+            speedups.append(base / comp)   # >1 means compare_warps is faster
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = range(len(plot_labels))
+    ax.bar(list(x), speedups, 0.6, color="#4C72B0")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1,
+               label="parity (no change)")
+    for i, s in enumerate(speedups):
+        ax.text(i, s, f"{s:.2f}x", ha="center", va="bottom")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(plot_labels, rotation=30, ha="right")
+    ax.set_ylabel(f"speedup of {compare_warps} warps vs {baseline_warps} warps "
+                  f"(custom {block_m}x{block_n})  — higher is better")
+    ax.set_title(f"Config-level speedup: {block_m}x{block_n} "
+                 f"{compare_warps}-warp vs {baseline_warps}-warp (T4)\n"
+                 f"custom-vs-custom; NOT a comparison against PyTorch")
     ax.legend()
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

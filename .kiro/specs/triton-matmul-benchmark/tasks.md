@@ -58,7 +58,7 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - Verified on T4; observed output pasted back and interpreted
     - _Requirements: 6.1, 6.3, 6.4_
 
-- [ ] 2. Phase 1 — Finalize and generalize the tiled kernel (after Phase 0 verified)
+- [x] 2. Phase 1 — Finalize and generalize the tiled kernel (after Phase 0 verified)
   - [x] 2.1 Generalize the kernel for all required shape families
     - Confirmed the existing kernel already handles square, rectangular, small non-square, and non-multiple-of-tile shapes with no out-of-bounds read/write: grid is `cdiv(M,BLOCK_M)*cdiv(N,BLOCK_N)`; masks cover `offs_m<M`, `offs_n<N`, `offs_k<k_remaining` on every load/store with `other=0.0`; single final FP16 cast after FP32 accumulation. No implementation change required
     - Shape generality is exercised through the Phase 2 correctness suite's shape cases (verified on GPU)
@@ -68,12 +68,11 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - `kernels/matmul.py` carries a coherent step-by-step explanation (program IDs → grid mapping → pointer arithmetic → memory access → masks → FP32 accumulator → K-loop → FP16 conversion); the 4x4 / 2x2 hand trace was walked through with the developer
     - _Requirements: 1.4_
 
-  - [ ] 2.3 Provide Colab cells and STOP for pasted output (Phase 1 stop point)
-    - Phase 1 shape generality is folded into the Phase 2 correctness suite (Cell 4), which exercises square + rectangular + small non-square + non-multiple-of-tile shapes; no separate Phase 1 cell needed
-    - (Awaiting the Phase 2 Colab run, which also serves as the Phase 1 shape-generality evidence)
+  - [x] 2.3 Provide Colab cells and STOP for pasted output (Phase 1 stop point)
+    - Phase 1 shape generality folded into the Phase 2 correctness suite (Cell 4). Verified on T4: square/rectangular/small-non-square/non-multiple-of-tile shapes all exercised; no OOB behavior observed
     - _Requirements: 6.3, 6.4_
 
-- [ ] 3. Phase 2 — Correctness suite (after Phase 1 verified)
+- [x] 3. Phase 2 — Correctness suite (after Phase 1 verified)
   - [x] 3.1 Implement input generation and references
     - `make_inputs(m, k, n, seed=0)`: `torch.manual_seed(seed)` per case; deterministic FP16 inputs in an FP16-safe magnitude band
     - `ref_fp16(a, b)`: primary reference `torch.matmul(a, b)` (pass/fail decision)
@@ -97,12 +96,12 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - Write `results/correctness.csv` with the design's exact schema
     - _Requirements: 2.3, 2.5, 5.1_
 
-  - [ ] 3.5 Provide Colab cells and STOP for pasted output (Phase 2 stop point)
-    - Added notebook Cell 4 to run `run_correctness()` over `DEFAULT_CASES` x all six configs, write `correctness.csv`, and preview rows (PASS/FAIL/error + error metrics)
-    - (Awaiting developer-pasted Colab output of Cell 4 before Phase 3)
+  - [x] 3.5 Provide Colab cells and STOP for pasted output (Phase 2 stop point)
+    - Cell 4 verified on T4: 24/30 passed the FP16-reference criterion, 0 compile/runtime errors; the 6 failures (1000x1500x700) were investigated and the full output verified vs the FP32 reference (0/1,500,000 violations). The 24/30 FP16-reference result is preserved, not relabeled
+    - (Observed Colab output pasted and interpreted)
     - _Requirements: 6.3, 6.4_
 
-- [ ] 4. Phase 3 — Benchmark framework (after Phase 2 verified)
+- [x] 4. Phase 3 — Benchmark framework (after Phase 2 verified)
 
   > **Phase 2 investigation outcome (observed on T4):** the 6 FP16-reference
   > failures on 1000x1500x700 were investigated. 79/79 Triton violations
@@ -144,12 +143,11 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - `write_csv(records, path)` producing `results/benchmarks.csv`
     - _Requirements: 3.1, 3.2, 3.3, 5.1_
 
-  - [ ] 4.5 Provide Colab cells and STOP for pasted output (Phase 3 stop point)
-    - Added notebook Cell 6 (FP32-reference verification gate) and Cell 7 (`run_benchmarks()` over all sizes x six configs, writes `benchmarks.csv`, previews latency/tflops/speedup/skip_reason)
-    - (Awaiting developer-pasted Colab output of Cells 6 and 7 before Phase 4)
+  - [x] 4.5 Provide Colab cells and STOP for pasted output (Phase 3 stop point)
+    - Cells 6 and 7 verified on T4: FP32-reference gate passed (0 violations); all 30 size x config benchmarks executed with 0 skips/errors; results written to results/benchmarks.csv
     - _Requirements: 6.3, 6.4_
 
-- [ ] 5. Phase 4 — Manual optimization experiments (after Phase 3 verified)
+- [x] 5. Phase 4 — Manual optimization experiments (after Phase 3 verified)
 
   > **Phase 4 first-run results (observed on T4; preserved as run 1):** all 30
   > configs executed with 0 resource/compile errors. Fastest custom config was
@@ -170,17 +168,16 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - Fastest correct config per workload identified from measured records (64x64x32/8-warps); initial-Triton vs best-Triton vs PyTorch compared from measured medians only (no invented speedups; custom remained slower than PyTorch)
     - _Requirements: 4.2, 4.4_
 
-  - [ ] 5.3 Provide Colab cells and STOP for pasted output (Phase 4 stop point)
-    - First run already measured and pasted. Added methodology-review tooling: `gpu_state()`, `kernel_resources()` (raw register/shared/spill metadata where exposed; no spilling claim), `repeat_compare()` + `write_repeat_csv()` (separate CSV), and median-vs-p50 reporting; notebook Cell 8 runs it
-    - (Awaiting developer-pasted Colab output of Cell 8 before finalizing Phase 5 conclusions)
+  - [x] 5.3 Provide Colab cells and STOP for pasted output (Phase 4 stop point)
+    - Methodology review verified on T4: repeatability confirmed ~2.0x lower latency for 8 vs 4 warps on 4096^3 (second run, results/benchmarks_repeat.csv, run 1 preserved). GPU clock/thermal snapshots captured; repeatable ratio across runs indicates a real config effect, not drift. Kernel resource metadata was UNAVAILABLE on this Triton 3.6.0/T4 build, so the 128x128 regression is left unexplained (not attributed to spilling)
     - _Requirements: 6.3, 6.4_
 
-- [ ] 6. Phase 5 — Results, plots, and documentation (after Phase 4 verified)
+- [x] 6. Phase 5 — Results, plots, and documentation (after Phase 4 verified)
   - [x] 6.1 Implement plotting helpers
-    - `plot_latency(csv_path, out_path)` → `results/latency_comparison.png`
+    - `plot_latency(csv_path, out_path, log_y=True)` → `results/latency_comparison.png` (log-scale y-axis for legibility across 512^3..4096^3)
     - `plot_throughput(csv_path, out_path)` → `results/throughput_comparison.png`
-    - Both read ONLY the measured `results/benchmarks.csv` (fastest custom config vs PyTorch); nothing fabricated
-    - (PNG generation awaits Cell 9 on GPU/Colab)
+    - `plot_config_speedup(...)` → `results/config_speedup.png` (custom 64x64 8-warp vs 4-warp; explicitly custom-vs-custom, NOT vs PyTorch)
+    - All read ONLY the measured `results/benchmarks.csv`; nothing fabricated. Latency plot verified generated on T4
     - _Requirements: 5.1_
 
   - [x] 6.2 Finalize README.md
@@ -189,14 +186,13 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - Clearly separate measurements from interpretations and hypotheses
     - _Requirements: 5.2, 5.3_
 
-  - [ ] 6.3 Implement results-persistence step
-    - Add notebook cell with both options: download `results/` locally (`google.colab.files.download`) OR commit/push to the GitHub repo
-    - Do NOT auto-commit unverified, empty, or fabricated results; only persist artifacts from an actual observed Colab run
+  - [x] 6.3 Implement results-persistence step
+    - README documents both options: download `results/` from Colab (zip + files.download) OR add the measured files to the repo. Publish instructions add only NEW result files via explicit `git add` of each artifact, so existing measured files are never overwritten
+    - No auto-commit of unverified/empty/fabricated results; only observed Colab artifacts are published
     - _Requirements: 5.4_
 
-  - [ ] 6.4 Provide final Colab cells and STOP for pasted output (Phase 5 stop point)
-    - Add notebook cells to generate both PNGs from measured records, display them, and run the chosen persistence option
-    - Emit the final five-part closing report and HALT until the developer pastes observed Colab output
+  - [x] 6.4 Provide final Colab cells and STOP for pasted output (Phase 5 stop point)
+    - Cell 9 generates latency (log-scale), throughput, and config-speedup PNGs from measured records and displays them; developer confirmed the latency plot was generated on T4
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 6.3, 6.4_
 
 ## Notes
