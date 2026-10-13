@@ -1,0 +1,18 @@
+{
+  "shape": {
+    "m": 1000,
+    "n": 1500,
+    "k": 700,
+    "seed": 2
+  },
+  "reference_config": "64x64x32_w4",
+  "equal_to_reference": {
+    "64x64x32_w4": true,
+    "64x64x32_w8": true,
+    "128x128x32_w4": true,
+    "128x128x32_w8": true,
+    "128x64x32_w4": true,
+    "128x64x32_w8": true
+  },
+  "all_six_identical": true
+}

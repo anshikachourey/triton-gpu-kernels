@@ -1,0 +1,70 @@
+{
+  "config": [
+    64,
+    64,
+    32,
+    8,
+    2
+  ],
+  "shape": {
+    "m": 1000,
+    "n": 1500,
+    "k": 700,
+    "seed": 2
+  },
+  "reduced_precision_reduction_toggle_supported": true,
+  "vs_fp16_ref": {
+    "max_abs_error": 0.0625,
+    "mean_abs_error": 0.0026403148658573627,
+    "rel_error_max_robust": 10.337499618530273,
+    "rel_error_mean_robust": 0.0006382985156960785,
+    "rel_error_p99_robust": 0.005689900368452072,
+    "tol_violations": 79,
+    "tol_violation_pct": 0.005266666666666667
+  },
+  "vs_fp64_ref_rounded_fp16": {
+    "max_abs_error": 0.0625,
+    "mean_abs_error": 8.383193744521122e-06,
+    "rel_error_max_robust": 0.0257492046803236,
+    "rel_error_mean_robust": 1.8388981288808282e-06,
+    "rel_error_p99_robust": 0.0,
+    "tol_violations": 0,
+    "tol_violation_pct": 0.0
+  },
+  "triton_vs_fp64rounded_ulp": {
+    "max_ulp": 108,
+    "mean_ulp": 0.003094666637480259,
+    "frac_within_1_ulp": 0.999842643737793,
+    "frac_within_2_ulp": 0.9999079704284668
+  },
+  "triton_exact_matches_vs_fp64rounded": 1496774,
+  "triton_exact_match_pct": 99.78493333333333,
+  "total_elements": 1500000,
+  "fp16ref_vs_fp64rounded": {
+    "max_abs_error": 0.0625,
+    "mean_abs_error": 0.0026398811023682356,
+    "rel_error_max_robust": 7.680296421051025,
+    "rel_error_mean_robust": 0.0006688652210868895,
+    "rel_error_p99_robust": 0.005691057071089745,
+    "tol_violations": 80,
+    "tol_violation_pct": 0.005333333333333333
+  },
+  "fp16ref_noreduce_vs_fp64rounded": {
+    "max_abs_error": 0.0625,
+    "mean_abs_error": 2.3840377252781764e-05,
+    "rel_error_max_robust": 0.04434585198760033,
+    "rel_error_mean_robust": 4.251995051163249e-06,
+    "rel_error_p99_robust": 0.0,
+    "tol_violations": 0,
+    "tol_violation_pct": 0.0
+  },
+  "triton_vs_fp16ref_noreduce": {
+    "max_abs_error": 0.0625,
+    "mean_abs_error": 2.512050195946358e-05,
+    "rel_error_max_robust": 0.06794929504394531,
+    "rel_error_mean_robust": 4.537816039373865e-06,
+    "rel_error_p99_robust": 0.0,
+    "tol_violations": 0,
+    "tol_violation_pct": 0.0
+  }
+}
