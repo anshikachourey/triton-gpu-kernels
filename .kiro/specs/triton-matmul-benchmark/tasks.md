@@ -11,26 +11,36 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
 ## Tasks
 
 - [ ] 1. Phase 0 — Repo skeleton, kernel, host wrapper, smoke test (implement now)
-  - [ ] 1.1 Create repository skeleton and documented dependency stack
+
+  > **Phase 0 status (observed on NVIDIA Tesla T4, Colab):** the kernel
+  > **compiled and executed without errors**. The 256x256 smoke test produced
+  > shape (256, 256), dtype torch.float16, config (64, 64, 32, 4, 2),
+  > max_abs_error (FP32 eval) = 0.015625, robust_rel_error = 1.16e-03.
+  > GPU compilation/execution is CONFIRMED. Full numerical correctness is
+  > NOT yet claimed: an explicit elementwise tolerance check
+  > (torch.testing.assert_close, atol=rtol=1e-2) has been added and must be
+  > rerun in Colab to verify pass/fail before Phase 1.
+
+  - [x] 1.1 Create repository skeleton and documented dependency stack
     - Create `kernels/matmul.py`, `tests/test_matmul.py` (stub), `benchmarks/benchmark.py` (stub), `notebooks/colab_runner.ipynb`, and the `results/` directory
     - Create `requirements.txt` documenting the confirmed stack: `torch==2.11.0+cu130`, `triton==3.6.0`, `matplotlib` (install only if missing); note that torch/triton are preinstalled on Colab and MUST NOT be reinstalled or downgraded
     - Create `README.md` stub to be finalized in Phase 5
     - Keep all kernel/test/benchmark logic in importable modules; the notebook only imports and calls (key boundary rule)
     - _Requirements: 5.1, 6.1, 6.2_
 
-  - [ ] 1.2 Implement MatmulConfig dataclass
+  - [x] 1.2 Implement MatmulConfig dataclass
     - Add `@dataclass(frozen=True) MatmulConfig` with `block_m`, `block_n`, `block_k`, `num_warps`, and `num_stages` fixed at 2 (recorded, not hidden)
     - Default `MatmulConfig(block_m=64, block_n=64, block_k=32, num_warps=4, num_stages=2)`
     - _Requirements: 1.5_
 
-  - [ ] 1.3 Implement the `_matmul_kernel` Triton kernel with teaching comments
+  - [x] 1.3 Implement the `_matmul_kernel` Triton kernel with teaching comments
     - Use `@triton.jit`; derive `(pid_m, pid_n)` from `tl.program_id(axis=0)` with row-major 1-D ordering
     - Explicit pointer arithmetic for A/B/C tiles via strides; `tl.arange` offsets for M/N/K
     - FP32 accumulator initialization; K-loop with `tl.dot`; masked `tl.load`/`tl.store` with `other=0.0`; FP16 cast on store
     - Add meaningful inline teaching comments covering: program IDs, grid-to-tile mapping, pointer offsets, memory access patterns, boundary masks, FP32 accumulator init, K-loop accumulation, and FP16 output conversion
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
 
-  - [ ] 1.4 Implement the `matmul()` host wrapper
+  - [x] 1.4 Implement the `matmul()` host wrapper
     - Validate inputs: `a.dtype == b.dtype == float16`, `a.ndim == b.ndim == 2`, `a.shape[1] == b.shape[0]`, both on CUDA
     - Validate supplied `out`: shape `[M, N]`, FP16 dtype, same CUDA device as inputs, contiguous layout; allocate FP16 `C[M,N]` only when `out` is not supplied
     - Compute 1-D grid `cdiv(M, block_m) * cdiv(N, block_n)`; launch with strides, `num_warps`, and `num_stages` both passed EXPLICITLY
@@ -38,12 +48,16 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
 
   - [ ] 1.5 Add a 256x256 smoke test with conservative config
     - In `tests/test_matmul.py`, add a minimal smoke-test entry point that runs 256x256 with `MatmulConfig(64, 64, 32, 4, num_stages=2)`
-    - Compare against `torch.matmul` by converting both outputs to FP32 and printing the observed max absolute error (no pass/fail assertion forced before evidence)
+    - Compare against `torch.matmul` by converting both outputs to FP32 and printing the observed max absolute error
+    - Added an explicit elementwise pass/fail check via `torch.testing.assert_close(c_triton.float(), c_ref.float(), atol=1e-2, rtol=1e-2)`, reported as `passed`/`check_message` alongside the raw metrics
+    - (Awaiting Colab rerun to confirm the pass/fail verdict)
     - _Requirements: 1.1, 6.3_
 
   - [ ] 1.6 Provide exact Colab cells and STOP for pasted output (Phase 0 stop point)
-    - Add notebook cells: (a) environment verification printing GPU name, compute capability, and torch/CUDA/triton versions (must match confirmed stack); (b) repo setup via `git clone` + `sys.path.append` OR upload/mount + `sys.path.append`; (c) run the 256x256 smoke test and print shape, dtype, and FP32 max abs error
+    - Notebook cells: (a) environment verification printing GPU name, compute capability, and torch/CUDA/triton versions; (b) repo setup setting `REPO_ROOT` via `git clone` OR upload/mount; (c) run the 256x256 smoke test and print shape, dtype, FP32 errors, and the explicit tolerance verdict
+    - Fixed the `tests.test_matmul` import collision permanently: Cell 3 loads the test module directly from its file path via `importlib.util.spec_from_file_location` instead of `import tests.test_matmul`
     - Emit the five-part closing report and HALT until the developer pastes observed Colab output (Kiro has no local GPU and cannot verify GPU execution)
+    - (Awaiting Colab rerun of the updated smoke test with the explicit tolerance check)
     - _Requirements: 6.1, 6.3, 6.4_
 
 - [ ] 2. Phase 1 — Finalize and generalize the tiled kernel (after Phase 0 verified)

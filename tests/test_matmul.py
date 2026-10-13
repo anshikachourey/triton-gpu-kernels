@@ -53,6 +53,22 @@ def smoke_test_256(seed: int = 0) -> dict:
     denom = c_ref.float().abs().clamp_min(1e-3)
     robust_rel_error = (diff / denom).max().item()
 
+    # Explicit elementwise pass/fail check with the project's fixed tolerances.
+    # Compare in FP32 (so the comparison itself uses no FP16 arithmetic) using
+    # the same atol/rtol the full Phase 2 suite will use. assert_close raises on
+    # failure; we capture that into a boolean + message rather than crashing, so
+    # the smoke test always reports its numbers alongside the verdict.
+    atol, rtol = 1e-2, 1e-2
+    try:
+        torch.testing.assert_close(
+            c_triton.float(), c_ref.float(), atol=atol, rtol=rtol
+        )
+        passed = True
+        check_message = "PASS"
+    except AssertionError as exc:
+        passed = False
+        check_message = f"FAIL: {exc}"
+
     result = {
         "shape": tuple(c_triton.shape),
         "dtype": str(c_triton.dtype),
@@ -60,6 +76,10 @@ def smoke_test_256(seed: int = 0) -> dict:
                    config.num_warps, config.num_stages),
         "max_abs_error_fp32eval": max_abs_error,
         "robust_rel_error_fp32eval": robust_rel_error,
+        "atol": atol,
+        "rtol": rtol,
+        "passed": passed,
+        "check_message": check_message,
     }
     return result
 
@@ -67,8 +87,11 @@ def smoke_test_256(seed: int = 0) -> dict:
 if __name__ == "__main__":
     out = smoke_test_256()
     print("Smoke test 256x256")
-    print(f"  output shape        : {out['shape']}")
-    print(f"  output dtype        : {out['dtype']}")
+    print(f"  output shape         : {out['shape']}")
+    print(f"  output dtype         : {out['dtype']}")
     print(f"  config (BM,BN,BK,W,S): {out['config']}")
     print(f"  max abs error (FP32) : {out['max_abs_error_fp32eval']:.6e}")
     print(f"  robust rel error     : {out['robust_rel_error_fp32eval']:.6e}")
+    print(f"  tolerance (atol,rtol): ({out['atol']}, {out['rtol']})")
+    print(f"  elementwise check    : {out['check_message']}")
+    print(f"  passed               : {out['passed']}")
