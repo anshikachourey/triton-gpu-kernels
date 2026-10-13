@@ -290,6 +290,177 @@ def smoke_test_256(seed: int = 0) -> dict:
     }
 
 
+def diagnose_case(m: int = 1000, n: int = 1500, k: int = 700,
+                  seed: int = 2,
+                  config: MatmulConfig = MatmulConfig(64, 64, 32, 4, 2),
+                  top: int = 10) -> dict:
+    """Focused diagnostic for the failing rectangular case (default 1000x1500x700).
+
+    Uses the SAME deterministic inputs (make_inputs + the case seed) and the
+    SAME fixed tolerances (ATOL, RTOL). Does NOT loosen tolerances, change the
+    kernel, or alter input generation. The elementwise rule evaluated is the
+    identical one used by run_correctness:
+
+        violation  <=>  |c_triton - c_ref| > atol + rtol*|c_ref|   (in FP32)
+
+    Reports, for the Triton-vs-FP16-reference comparison:
+      - count and percentage of violating elements
+      - maximum EXCESS error above the allowed per-element tolerance
+      - the worst `top` mismatching coordinates with Triton / FP16-ref /
+        FP32-ref values, absolute diff, and the per-element allowed tolerance
+      - whether violations cluster near matrix boundaries vs are distributed
+    And separately compares the PyTorch FP16 reference against the FP32
+    reference under the SAME tolerance rule (how many elements the references
+    themselves disagree on).
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available. Run this in Google Colab with a Tesla T4 GPU."
+        )
+
+    # Same deterministic inputs as the correctness suite for this case.
+    a, b = make_inputs(m, k, n, seed=seed)
+    r16 = ref_fp16(a, b)
+    r32 = ref_fp32(a, b)
+
+    c = torch.empty((m, n), dtype=torch.float16, device="cuda")
+    matmul(a, b, config, out=c)
+    torch.cuda.synchronize()
+
+    # Everything evaluated in FP32.
+    cf = c.float()
+    r16f = r16.float()
+    r32f = r32.float()
+
+    # ---- Triton vs FP16 reference (the primary pass/fail comparison) -------
+    allowed = ATOL + RTOL * r16f.abs()          # per-element allowed tolerance
+    abs_diff = (cf - r16f).abs()
+    violation = abs_diff > allowed              # boolean mask of failures
+    excess = (abs_diff - allowed)               # how far over the line (can be <0)
+
+    total = violation.numel()
+    n_viol = int(violation.sum().item())
+    pct_viol = 100.0 * n_viol / total
+    max_excess = float(excess.max().item())     # max amount ABOVE tolerance
+
+    # Worst `top` violating coordinates by absolute difference.
+    worst = []
+    if n_viol > 0:
+        flat_excess = excess.flatten()
+        # Rank by excess so the "most over tolerance" show first.
+        k_top = min(top, n_viol)
+        vals, idxs = torch.topk(flat_excess, k_top)
+        for idx in idxs.tolist():
+            i = idx // n
+            j = idx % n
+            worst.append({
+                "row": i, "col": j,
+                "triton": float(cf[i, j].item()),
+                "ref_fp16": float(r16f[i, j].item()),
+                "ref_fp32": float(r32f[i, j].item()),
+                "abs_diff_vs_fp16": float(abs_diff[i, j].item()),
+                "allowed_tol": float(allowed[i, j].item()),
+                "excess": float(excess[i, j].item()),
+            })
+
+    # ---- Boundary clustering test -----------------------------------------
+    # "Near boundary" = within one default tile of any edge (last partial tile
+    # along M or N, or the final K-slice region). We use the kernel's tile
+    # sizes so this probes the masked/partial-tile regions specifically.
+    bm, bn = config.block_m, config.block_n
+    m_last = m - (m % bm) if (m % bm) else m - bm   # start row of last M tile
+    n_last = n - (n % bn) if (n % bn) else n - bn   # start col of last N tile
+    rows = torch.arange(m, device="cuda").view(m, 1)
+    cols = torch.arange(n, device="cuda").view(1, n)
+    near_boundary = (rows >= m_last) | (cols >= n_last)
+    near_boundary = near_boundary.expand(m, n)
+
+    viol_near = int((violation & near_boundary).sum().item())
+    viol_interior = n_viol - viol_near
+    boundary_cells = int(near_boundary.sum().item())
+    interior_cells = total - boundary_cells
+    # Densities let us compare clustering fairly despite different region sizes.
+    dens_near = (viol_near / boundary_cells) if boundary_cells else 0.0
+    dens_interior = (viol_interior / interior_cells) if interior_cells else 0.0
+
+    # ---- FP16 reference vs FP32 reference under the SAME rule --------------
+    allowed_ref = ATOL + RTOL * r32f.abs()
+    ref_abs_diff = (r16f - r32f).abs()
+    ref_violation = ref_abs_diff > allowed_ref
+    n_ref_viol = int(ref_violation.sum().item())
+    pct_ref_viol = 100.0 * n_ref_viol / total
+    ref_max_excess = float((ref_abs_diff - allowed_ref).max().item())
+
+    # How many of the Triton-vs-FP16 violations coincide with places where the
+    # two references themselves already disagree beyond tolerance.
+    overlap = int((violation & ref_violation).sum().item())
+
+    return {
+        "shape": (m, n, k),
+        "seed": seed,
+        "config": (config.block_m, config.block_n, config.block_k,
+                   config.num_warps, config.num_stages),
+        "atol": ATOL, "rtol": RTOL,
+        "total_elements": total,
+        # Triton vs FP16 reference
+        "n_violations": n_viol,
+        "pct_violations": pct_viol,
+        "max_excess_over_tol": max_excess,
+        "worst": worst,
+        # boundary clustering
+        "viol_near_boundary": viol_near,
+        "viol_interior": viol_interior,
+        "boundary_cells": boundary_cells,
+        "interior_cells": interior_cells,
+        "violation_density_near_boundary": dens_near,
+        "violation_density_interior": dens_interior,
+        # FP16 ref vs FP32 ref
+        "ref16_vs_ref32_violations": n_ref_viol,
+        "ref16_vs_ref32_pct": pct_ref_viol,
+        "ref16_vs_ref32_max_excess": ref_max_excess,
+        "triton_viol_overlapping_ref_disagreement": overlap,
+    }
+
+
+def print_diagnosis(d: dict) -> None:
+    """Pretty-print a diagnose_case() result."""
+    print("Rectangular-case diagnostic")
+    print(f"  shape (M,N,K)        : {d['shape']}")
+    print(f"  seed                 : {d['seed']}")
+    print(f"  config (BM,BN,BK,W,S): {d['config']}")
+    print(f"  tolerance (atol,rtol): ({d['atol']}, {d['rtol']})")
+    print(f"  total elements       : {d['total_elements']}")
+    print()
+    print("  -- Triton vs FP16 reference (primary pass/fail) --")
+    print(f"  violating elements   : {d['n_violations']} "
+          f"({d['pct_violations']:.4f}%)")
+    print(f"  max excess over tol  : {d['max_excess_over_tol']:.6e}")
+    print()
+    print("  -- boundary clustering --")
+    print(f"  viol near boundary   : {d['viol_near_boundary']} "
+          f"(density {d['violation_density_near_boundary']:.3e} "
+          f"over {d['boundary_cells']} cells)")
+    print(f"  viol interior        : {d['viol_interior']} "
+          f"(density {d['violation_density_interior']:.3e} "
+          f"over {d['interior_cells']} cells)")
+    print()
+    print("  -- FP16 reference vs FP32 reference (same rule) --")
+    print(f"  ref16 vs ref32 viol  : {d['ref16_vs_ref32_violations']} "
+          f"({d['ref16_vs_ref32_pct']:.4f}%)")
+    print(f"  ref16 vs ref32 max excess : {d['ref16_vs_ref32_max_excess']:.6e}")
+    print(f"  triton viols that overlap ref disagreement : "
+          f"{d['triton_viol_overlapping_ref_disagreement']}")
+    print()
+    print(f"  -- worst {len(d['worst'])} mismatching coordinates --")
+    hdr = ("    (row,col)      triton        ref_fp16      ref_fp32      "
+           "abs_diff      allowed_tol")
+    print(hdr)
+    for w in d["worst"]:
+        print("    (%4d,%4d)  % .6e  % .6e  % .6e  %.6e  %.6e" % (
+            w["row"], w["col"], w["triton"], w["ref_fp16"], w["ref_fp32"],
+            w["abs_diff_vs_fp16"], w["allowed_tol"]))
+
+
 def summarize(records) -> dict:
     """Small summary for printing: counts of ok/error/passed/failed."""
     total = len(records)
