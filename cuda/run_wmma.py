@@ -202,8 +202,10 @@ def performance(lib, sizes=(256, 1024), seed=0, repeats=5,
                 "cuda_tflops": tflops(t_cuda),
                 "triton_tflops": tflops(t_tri),
                 "torch_tflops": tflops(t_torch),
-                "cuda_vs_torch_speedup": t_torch / t_cuda,
-                "cuda_vs_triton_speedup": t_tri / t_cuda,
+                # Speedup = how many times FASTER CUDA is than the other path,
+                # i.e. other_ms / cuda_ms. A value > 1 means CUDA is faster.
+                "cuda_speedup_over_torch": t_torch / t_cuda,   # torch_ms / cuda_ms
+                "cuda_speedup_over_triton": t_tri / t_cuda,    # triton_ms / cuda_ms
                 "sm_clock_mhz_before": clk_before,
                 "sm_clock_mhz_after": clk_after,
             })
@@ -226,11 +228,15 @@ def print_correctness(records):
 
 
 def print_performance(rows):
+    # The two ratio columns are "how many times faster CUDA is" =
+    # torch_ms/cuda_ms and triton_ms/cuda_ms (value > 1 => CUDA faster).
     print("CUDA WMMA performance (median ms; interleaved repeats)")
     print("  size repeat cuda_ms   triton_ms torch_ms  "
-          "cuda/torch cuda/triton clk_before")
+          "cuda_faster_than_torch(x) cuda_faster_than_triton(x) clk_before")
     for r in rows:
-        print("  %-4d %-6d %-9.4f %-9.4f %-9.4f %-10.3f %-11.3f %s" % (
+        # Accept either the new keys or the earlier (now-renamed) keys.
+        s_torch = r.get("cuda_speedup_over_torch", r.get("cuda_vs_torch_speedup"))
+        s_triton = r.get("cuda_speedup_over_triton", r.get("cuda_vs_triton_speedup"))
+        print("  %-4d %-6d %-9.4f %-9.4f %-9.4f %-25.3f %-26.3f %s" % (
             r["size"], r["repeat"], r["cuda_ms"], r["triton_ms"], r["torch_ms"],
-            r["cuda_vs_torch_speedup"], r["cuda_vs_triton_speedup"],
-            str(r["sm_clock_mhz_before"])))
+            s_torch, s_triton, str(r["sm_clock_mhz_before"])))

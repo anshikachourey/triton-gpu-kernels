@@ -340,6 +340,74 @@ pass/fail flags are not changed or reinterpreted.
   path was not disassembled. The spill evidence is correlational with the
   slowdown, not a measured time breakdown.
 
+## CUDA C++ WMMA extension (separate from the Triton experiments)
+
+As a focused extension, a minimal **CUDA C++** FP16 matmul was added using
+NVIDIA **WMMA Tensor Core** operations (`nvcuda::wmma`, 16×16×16 tile), to
+contrast an explicit Tensor Core path with the Triton kernel. This is a separate
+study; the Triton kernel, its benchmarks, and all original findings are
+unchanged.
+
+### What was implemented
+
+- `cuda/wmma_matmul.cu`: a **naive** kernel — one warp per 16×16 output tile,
+  fragments loaded straight from global memory, **no shared-memory tiling or
+  pipelining**. FP16 inputs, FP32 accumulation, FP16 output (the FP32
+  accumulator fragment is converted element-wise to a half fragment before
+  `store_matrix_sync`). It is deliberately **not optimized**.
+- Square, 16-aligned workloads only (256×256, 1024×1024). The `extern "C"`
+  wrapper validates shape / alignment / null pointers and returns an error code
+  instead of launching on unsupported shapes.
+- Built with `nvcc -arch=sm_75` into a shared library and called from Python via
+  `ctypes` using `tensor.data_ptr()` (no `torch.utils.cpp_extension`, no
+  installs), so the same torch FP16 tensors feed the CUDA, Triton, and PyTorch
+  paths. Harness: `cuda/run_wmma.py`; raw artifacts under
+  `results/diagnostics/cuda/`.
+
+### Correctness (measured on the Tesla T4)
+
+Against an FP64 reference rounded to FP16, same inputs on all paths:
+
+| size | tolerance violations (atol=rtol=1e-2) | exact FP16 matches | max abs error |
+|------|--------------------------------------:|-------------------:|--------------:|
+| 256×256 | 0 | 99.7894% | 0.03125 |
+| 1024×1024 | 0 | 99.3512% | 0.0625 |
+
+### Verified Tensor Core execution (static SASS)
+
+`cuobjdump -sass` of the compiled CUDA kernel contained **20 HMMA** instructions
+(static count), **0 FFMA**, and **0 LDL/STL** local-memory instructions. This
+confirms the compiler emitted Tensor Core matrix instructions for the CUDA path
+— unlike the two previously inspected Triton configurations, whose SASS showed
+**no HMMA/IMMA** (see the investigation section above). As before, these are
+**static disassembly counts, not runtime instruction counters**.
+
+### Measured performance (reported separately; no original data changed)
+
+Interleaved, warmed-up, synchronized timing with preallocated FP16 output on all
+three paths (`results/diagnostics/cuda/cuda_performance.json`):
+
+- **256×256:** CUDA ≈ 0.0580–0.0608 ms vs Triton ≈ 0.1062–0.1088 ms.
+- **1024×1024** (after the first clock-transition repeat): CUDA ≈ 0.7537, 0.7814,
+  0.7686, 0.8028 ms; Triton ≈ 1.6013, 1.6072, 1.6154, 1.5971 ms; PyTorch ≈
+  0.0936, 0.0865, 0.0964, 0.0851 ms.
+- Taking the median of the last four 1024×1024 repeats, the CUDA WMMA kernel is
+  about **2.07× faster than the custom Triton kernel**. The CUDA kernel remains
+  **substantially slower than PyTorch** (cuBLAS) at this size.
+
+**Interpretation and caveats (kept careful):**
+- CUDA (Tensor Core) being faster than our Triton kernel is **consistent with**
+  the HMMA-vs-no-HMMA difference, but we do **not** claim Tensor Core
+  instructions alone account for the entire improvement — tiling, memory
+  behavior, and launch configuration also differ, and we did not isolate each
+  contribution.
+- The CUDA kernel does **not** beat PyTorch; the vendor path is still faster.
+- The first 1024×1024 repeat was discarded for the summary because of a GPU
+  clock transition; clocks were sampled before/after each repeat (not
+  continuously), so per-repeat ratios still carry clock-drift uncertainty.
+- All CUDA results are reported in `results/diagnostics/cuda/` and are kept
+  separate from the original Triton benchmark CSVs.
+
 ## Performance tradeoffs and limitations
 
 - A straightforward tiled kernel does not match cuBLAS; PyTorch was faster
@@ -426,7 +494,11 @@ tutorial. This project differs in several deliberate ways:
 kernels/matmul.py             # Triton kernel + MatmulConfig + matmul() host wrapper
 tests/test_matmul.py          # smoke test, correctness suite, diagnostics, FP32 check
 benchmarks/benchmark.py       # benchmarking + methodology review + plotting
+benchmarks/diagnostics.py     # read-only HW + numerical diagnostics (Triton)
+cuda/wmma_matmul.cu           # naive CUDA C++ WMMA Tensor Core kernel (extension)
+cuda/run_wmma.py              # ctypes harness: CUDA vs Triton vs PyTorch
 notebooks/colab_runner.ipynb  # thin runner: imports modules, runs each phase
 results/                      # benchmarks.csv, correctness.csv, *.png (generated)
+results/diagnostics/          # Triton + CUDA diagnostic artifacts (generated)
 requirements.txt              # documented versions (minimal installs)
 ```
