@@ -103,18 +103,34 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - _Requirements: 6.3, 6.4_
 
 - [ ] 4. Phase 3 — Benchmark framework (after Phase 2 verified)
-  - [ ] 4.1 Implement TFLOPS and timing primitives
+
+  > **Phase 2 investigation outcome (observed on T4):** the 6 FP16-reference
+  > failures on 1000x1500x700 were investigated. 79/79 Triton violations
+  > overlap elements where PyTorch's own FP16 and FP32 references disagree;
+  > violation densities are near-identical at boundary (5.76e-05) vs interior
+  > (5.24e-05), not a masking pattern. Strong evidence (not proof) of an
+  > FP16-reference precision artifact near zero-magnitude outputs, not a kernel
+  > bug. A targeted FP32-reference verification (verify_against_fp32) is added
+  > as the gate: if it passes, Phase 3 proceeds; the original 24/30
+  > FP16-reference results are preserved, not relabeled.
+  >
+  > **Note (minor, in-scope deviation):** benchmarks.csv carries timing +
+  > env metadata only; per-element FP16/FP32 error metrics live in
+  > correctness.csv (already validated in Phase 2) to avoid re-running the
+  > correctness comparison inside the timed benchmark path.
+
+  - [x] 4.1 Implement TFLOPS and timing primitives
     - `tflops(m, n, k, latency_ms)`: `(2*m*n*k) / (latency_seconds * 1e12)`
     - `bench_median(fn)`: primary latency via `triton.testing.do_bench(fn, return_mode="median")`
     - `bench_quantiles(fn)`: separate `do_bench(fn, quantiles=[0.2, 0.5, 0.8])` returning (p20, p50, p80); quantile-run p50 recorded independently of the primary median
     - Realizes Correctness Property P5 (TFLOPS definition from the primary median)
     - _Requirements: 3.1, 3.2_
 
-  - [ ] 4.2 Implement environment_info and EnvInfo
+  - [x] 4.2 Implement environment_info and EnvInfo
     - `environment_info()`: collect GPU model, compute capability, torch/CUDA/triton versions, `cuda_available`
     - _Requirements: 3.3_
 
-  - [ ] 4.3 Implement run_benchmarks with preallocated output and robust error handling
+  - [x] 4.3 Implement run_benchmarks with preallocated output and robust error handling
     - Benchmark identical operation `C = A @ B` on BOTH sides with preallocated FP16 out: `torch.matmul(a, b, out=c_torch)` and `matmul(a, b, config, out=c_triton)`
     - Exclude one-time compilation via a throwaway launch before timing
     - Attempt every config; catch `triton.runtime.errors.OutOfResources`, Triton compile failures, and `torch.cuda.OutOfMemoryError`; record `skipped` with the ACTUAL error type + message in `skip_reason`; call `torch.cuda.empty_cache()` and continue
@@ -123,14 +139,14 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - Realizes Correctness Properties P6 (evidence integrity) and P7 (operation consistency)
     - _Requirements: 3.1, 3.2, 3.3_
 
-  - [ ] 4.4 Implement BenchmarkRecord and benchmarks.csv writer
-    - Define `BenchmarkRecord` with all design fields (primary median, p20/p50/p80, tflops, speedup, paired FP16/FP32 errors, env metadata, status, skip_reason)
-    - `write_csv(records, path)` producing `results/benchmarks.csv` with the design's exact schema
+  - [x] 4.4 Implement BenchmarkRecord and benchmarks.csv writer
+    - Define `BenchmarkRecord` (primary median, p20/p50/p80, tflops, speedup, env metadata, status, skip_reason); per-element error metrics are kept in correctness.csv (see Phase 3 note)
+    - `write_csv(records, path)` producing `results/benchmarks.csv`
     - _Requirements: 3.1, 3.2, 3.3, 5.1_
 
   - [ ] 4.5 Provide Colab cells and STOP for pasted output (Phase 3 stop point)
-    - Add notebook cell to run `run_benchmarks()` on the default config over all sizes, write `benchmarks.csv`, and preview rows (latency, tflops, status/skip_reason)
-    - Emit the five-part closing report and HALT until the developer pastes observed Colab output
+    - Added notebook Cell 6 (FP32-reference verification gate) and Cell 7 (`run_benchmarks()` over all sizes x six configs, writes `benchmarks.csv`, previews latency/tflops/speedup/skip_reason)
+    - (Awaiting developer-pasted Colab output of Cells 6 and 7 before Phase 4)
     - _Requirements: 6.3, 6.4_
 
 - [ ] 5. Phase 4 — Manual optimization experiments (after Phase 3 verified)

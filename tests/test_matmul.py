@@ -461,6 +461,71 @@ def print_diagnosis(d: dict) -> None:
             w["abs_diff_vs_fp16"], w["allowed_tol"]))
 
 
+def verify_against_fp32(m: int = 1000, n: int = 1500, k: int = 700,
+                        seed: int = 2,
+                        config: MatmulConfig = MatmulConfig(64, 64, 32, 4, 2)) -> dict:
+    """Targeted verification of the full rectangular output against the FP32
+    reference using the SAME elementwise tolerance rule (atol=rtol=1e-2).
+
+    This does NOT relabel or replace the FP16-reference results from
+    run_correctness; it is an additional, separately-reported check against the
+    FP32 (true-math) reference. Tolerances are the fixed ATOL/RTOL and are never
+    loosened. Kernel, input generation, and configs are unchanged.
+
+    Rule (evaluated in FP32):
+        violation  <=>  |c_triton - ref_fp32| > atol + rtol*|ref_fp32|
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available. Run this in Google Colab with a Tesla T4 GPU."
+        )
+
+    a, b = make_inputs(m, k, n, seed=seed)
+    r32 = ref_fp32(a, b)
+
+    c = torch.empty((m, n), dtype=torch.float16, device="cuda")
+    matmul(a, b, config, out=c)
+    torch.cuda.synchronize()
+
+    cf = c.float()
+    r32f = r32.float()
+    allowed = ATOL + RTOL * r32f.abs()
+    abs_diff = (cf - r32f).abs()
+    violation = abs_diff > allowed
+    excess = abs_diff - allowed
+
+    n_viol = int(violation.sum().item())
+    total = violation.numel()
+    passed = n_viol == 0
+    return {
+        "shape": (m, n, k),
+        "seed": seed,
+        "config": (config.block_m, config.block_n, config.block_k,
+                   config.num_warps, config.num_stages),
+        "atol": ATOL, "rtol": RTOL,
+        "total_elements": total,
+        "n_violations_vs_fp32": n_viol,
+        "pct_violations_vs_fp32": 100.0 * n_viol / total,
+        "max_excess_over_tol_vs_fp32": float(excess.max().item()),
+        "max_abs_error_vs_fp32": float(abs_diff.max().item()),
+        "passed_vs_fp32": passed,
+    }
+
+
+def print_fp32_verification(v: dict) -> None:
+    """Pretty-print a verify_against_fp32() result."""
+    print("FP32-reference verification (full rectangular output)")
+    print(f"  shape (M,N,K)        : {v['shape']}")
+    print(f"  config (BM,BN,BK,W,S): {v['config']}")
+    print(f"  tolerance (atol,rtol): ({v['atol']}, {v['rtol']})")
+    print(f"  total elements       : {v['total_elements']}")
+    print(f"  violations vs FP32   : {v['n_violations_vs_fp32']} "
+          f"({v['pct_violations_vs_fp32']:.6f}%)")
+    print(f"  max excess over tol  : {v['max_excess_over_tol_vs_fp32']:.6e}")
+    print(f"  max abs error vs FP32: {v['max_abs_error_vs_fp32']:.6e}")
+    print(f"  passed vs FP32       : {v['passed_vs_fp32']}")
+
+
 def summarize(records) -> dict:
     """Small summary for printing: counts of ok/error/passed/failed."""
     total = len(records)
