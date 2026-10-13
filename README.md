@@ -140,9 +140,11 @@ first-run `latency_ms_primary_median`):
   The best custom standing vs PyTorch was `speedup_vs_torch ≈ 0.195`
   (`1000×1500×700`, 64×64/8-warp), i.e. about **5× slower** than PyTorch; the
   512³ 64×64/4-warp case was `≈ 0.073` (about 14× slower).
-- The **128×128** configurations showed unexpectedly severe regressions
-  (e.g. `4096³` 128×128/4-warp: **2552.76 ms**, ~49× slower than the same-shape
-  64×64/4-warp custom config).
+- The **128×128** configurations showed severe regressions (e.g. `4096³`
+  128×128/4-warp: **2552.76 ms**, ~49× slower than the same-shape 64×64/4-warp
+  custom config). Static disassembly later linked this to heavy register
+  spilling and local-memory traffic — see the hardware investigation section
+  below (correlational, not a full causal measurement).
 
 > **Reading `speedup_vs_torch`:** it is defined as
 > `torch_median / triton_median` (PyTorch latency divided by Triton latency).
@@ -249,11 +251,82 @@ read as low-sample point estimates, not characterized spreads.
 - **Measurement:** 8 warps beat 4 warps for the 64×64 tile on the large
   workloads; PyTorch (cuBLAS-backed) was faster than every custom config; the
   128×128 configs regressed severely.
-- **Resource metadata:** on this Triton 3.6.0 / T4 build, the compiled-kernel
-  register / shared-memory / spill metadata was **unavailable** via the JIT
-  cache. Because of that, the 128×128 regression is **not** attributed to
-  register spilling or any specific resource cause — it remains an open,
-  unexplained observation rather than a diagnosed one.
+- **Resource metadata:** metadata was not readable from the Triton JIT Python
+  handle on this 3.6.0 / T4 build, but the static-disassembly path
+  (`cuobjdump`) did yield register / spill / shared-memory counts and SASS
+  instruction mixes. See the dedicated investigation section below for the
+  actual numbers and their limitations.
+
+## Hardware and numerical investigation (static evidence)
+
+This section records a focused diagnostic pass on two configurations
+(`benchmarks/diagnostics.py`, Colab Cells 10–11). Raw artifacts are under
+`results/diagnostics/`. **These are documentation findings; they do not modify
+the kernel or any original measurement.**
+
+### Hardware evidence (static disassembly — not runtime counters)
+
+Observed on the Tesla T4:
+
+| metric | 64×64×32, 8 warps | 128×128×32, 4 warps |
+|--------|------------------:|--------------------:|
+| registers / thread (`n_regs`) | 188 | 64 |
+| spills (`n_spills`) | 0 | 2,806 |
+| shared memory (bytes) | 8,192 | 16,384 |
+| SASS HMMA (Tensor Core FP16 MMA) | 0 | 0 |
+| SASS IMMA | 0 | 0 |
+| SASS FFMA (FP32 fused multiply-add) | 512 | 4,096 |
+| SASS LDL / STL (local load / store) | 0 / 0 | 3,955 / 3,536 |
+
+PTX and TTGIR showed **no** MMA instruction or MMA-layout matches for either
+configuration.
+
+**Important measurement caveat:** every count above is a **static disassembly
+count** (from the compiled SASS/PTX/TTGIR), **not** a runtime
+hardware-performance-counter measurement. A static count reflects how many such
+instructions exist in the compiled program, not how many times they execute at
+runtime, and it does not by itself quantify time spent. Register and spill
+figures likewise come from the compiled binary, not from a profiler.
+
+### Numerical evidence (FP64-anchored investigation, separate from the suite)
+
+On the `1000×1500×700` workload (original input scheme, seed 2), comparing the
+custom Triton output against an FP64 reference rounded to FP16:
+
+- **0** tolerance violations (atol = rtol = 1e-2); max abs error **0.0625**;
+  mean abs error **≈ 8.38e-6**.
+- **1,496,774 / 1,500,000 (99.7849%)** Triton outputs **exactly** match the
+  rounded FP64 reference (bitwise FP16).
+- The **original PyTorch FP16 reference** vs rounded FP64: **80** tolerance
+  violations, mean abs error **≈ 0.002640**.
+- PyTorch FP16 with **`allow_fp16_reduced_precision_reduction=False`** vs rounded
+  FP64: **0** violations, mean abs error **≈ 2.384e-5**.
+- All six Triton configurations produced **bitwise-identical** results
+  (`torch.equal` across the six configs).
+
+**Relationship to the committed correctness result:** the original
+FP16-reference suite result stands unchanged — **24 / 30** config-level passes
+(**4 / 5** shapes), with the six `1000×1500×700` failures recorded in
+`results/correctness.csv`. This FP64-based pass is a **separate investigation**,
+not a re-scoring of that suite: it indicates the custom kernel closely tracks
+the true (FP64) result and that the original FP16-reference failures line up
+with PyTorch's default FP16 reduced-precision reduction (which, when disabled,
+brings the PyTorch FP16 reference into agreement with FP64). The committed
+pass/fail flags are not changed or reinterpreted.
+
+### Conclusions (supported) and their limits
+
+- **Supported:** neither inspected compiled kernel contains Tensor Core matrix
+  instructions (SASS HMMA/IMMA = 0, no PTX/TTGIR MMA); both perform the multiply
+  with ordinary **FP32 FFMA** instructions.
+- **Supported:** the 128×128/4-warp kernel shows **2,806 spills** and heavy
+  local-memory traffic (**LDL 3,955 / STL 3,536**), **consistent with** its
+  severe measured slowdown.
+- **Not claimed:** these static observations do **not** establish the complete
+  quantitative cause of the gap versus PyTorch. We have not profiled runtime
+  instruction issue, occupancy, or memory-stall cycles, and PyTorch's cuBLAS
+  path (which on the T4 can use Tensor Cores) was not disassembled. The spill
+  evidence is correlational with the slowdown, not a measured time breakdown.
 
 ## Performance tradeoffs and limitations
 
