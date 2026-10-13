@@ -323,3 +323,332 @@ def print_benchmarks(records) -> None:
             if not math.isnan(r.speedup_vs_torch) else "-"
         print("%-21s %-14s %-8s %-11s %-10s %-8s %s" % (
             r.label, r.impl, r.status, med, tfl, spd, r.skip_reason))
+
+
+# ----------------------------------------------------------------------------
+# Phase 3b: methodology review (repeatability, median-vs-p50, resources, clocks)
+# ----------------------------------------------------------------------------
+# These helpers are ADDITIVE. They do not change run_benchmarks or overwrite the
+# first experimental run (results/benchmarks.csv). They write to separate files
+# so the original measurements are preserved.
+
+def gpu_state() -> dict:
+    """Best-effort snapshot of GPU clock + temperature + memory.
+
+    Used to check whether configurations are inadvertently measured under
+    different GPU conditions (clock changes / thermal throttling). Every field
+    degrades gracefully to None if the installed torch/driver does not expose
+    it, so this never raises on the T4 runtime.
+    """
+    state = {
+        "sm_clock_mhz": None,
+        "mem_clock_mhz": None,
+        "temperature_c": None,
+        "power_w": None,
+        "mem_allocated_mb": None,
+        "mem_reserved_mb": None,
+    }
+    if not torch.cuda.is_available():
+        return state
+    try:
+        state["mem_allocated_mb"] = torch.cuda.memory_allocated() / 1e6
+        state["mem_reserved_mb"] = torch.cuda.memory_reserved() / 1e6
+    except Exception:
+        pass
+    # clock_rate / temperature / power_draw are available on newer torch builds.
+    for key, fn_name, scale in [
+        ("sm_clock_mhz", "clock_rate", 1.0),
+        ("temperature_c", "temperature", 1.0),
+        ("power_w", "power_draw", 1e-3),
+    ]:
+        try:
+            fn = getattr(torch.cuda, fn_name, None)
+            if fn is not None:
+                state[key] = fn(0) * scale
+        except Exception:
+            pass
+    return state
+
+
+def kernel_resources(m: int = 1024, n: int = 1024, k: int = 1024,
+                     config: MatmulConfig = MatmulConfig(64, 64, 32, 4, 2),
+                     seed: int = 0) -> dict:
+    """Best-effort extraction of compiled-kernel resource metadata.
+
+    Launches the kernel once (to trigger compilation) and inspects the Triton
+    JIT cache for register count, shared-memory bytes, and spill count where the
+    installed Triton version exposes them. Reports raw values ONLY -- it does
+    NOT infer that the larger-tile slowdown is caused by spilling. Fields are
+    None when unavailable.
+    """
+    info = {
+        "config": (config.block_m, config.block_n, config.block_k,
+                   config.num_warps, config.num_stages),
+        "n_regs": None,
+        "shared_bytes": None,
+        "n_spills": None,
+        "source": "unavailable",
+    }
+    if not torch.cuda.is_available():
+        return info
+
+    a, b = _make_inputs(m, k, n, seed)
+    c = torch.empty((m, n), dtype=torch.float16, device="cuda")
+    matmul(a, b, config, out=c)
+    torch.cuda.synchronize()
+
+    # Walk the kernel's compiled-cache entries and pull whatever attributes the
+    # installed Triton exposes. The structure varies across versions, so this is
+    # intentionally defensive.
+    try:
+        from kernels.matmul import _matmul_kernel  # the @triton.jit function
+        cache = getattr(_matmul_kernel, "cache", None)
+        compiled = None
+        if cache:
+            # cache is typically {device: {key: CompiledKernel}}.
+            for device_cache in cache.values():
+                for entry in device_cache.values():
+                    compiled = entry
+            if compiled is not None:
+                for attr, dst in [("n_regs", "n_regs"),
+                                   ("shared", "shared_bytes"),
+                                   ("metadata", "metadata"),
+                                   ("n_spills", "n_spills")]:
+                    val = getattr(compiled, attr, None)
+                    if attr == "metadata" and val is not None:
+                        info["n_regs"] = getattr(val, "n_regs", info["n_regs"])
+                        info["shared_bytes"] = getattr(val, "shared", info["shared_bytes"])
+                        info["n_spills"] = getattr(val, "n_spills", info["n_spills"])
+                    elif dst in info and val is not None:
+                        info[dst] = val
+                info["source"] = "triton_jit_cache"
+    except Exception as exc:
+        info["source"] = f"unavailable: {type(exc).__name__}: {exc}"
+    return info
+
+
+def repeat_compare(sizes=None, configs=None, repeats: int = 5, seed: int = 0):
+    """Targeted, repeatable benchmark to confirm config-level speedups.
+
+    Defaults to comparing 64x64x32 with 4 vs 8 warps on 1024^3 and 4096^3, over
+    `repeats` independent runs. For each (size, config, repeat) it records BOTH
+    the primary median (do_bench return_mode='median') and the quantile-run p50
+    (do_bench quantiles=[...]) so the two can be compared directly, plus a GPU
+    state snapshot to surface clock/thermal drift. Returns a list of dict rows.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available. Run this in Google Colab with a Tesla T4 GPU."
+        )
+    if sizes is None:
+        sizes = [
+            ShapeCase(1024, 1024, 1024, "1024^3", seed=0),
+            ShapeCase(4096, 4096, 4096, "4096^3", seed=0),
+        ]
+    if configs is None:
+        configs = [MatmulConfig(64, 64, 32, 4, 2), MatmulConfig(64, 64, 32, 8, 2)]
+
+    rows = []
+    for case in sizes:
+        m, n, k = case.m, case.n, case.k
+        for cfg in configs:
+            for r in range(repeats):
+                a, b = _make_inputs(m, k, n, case.seed)
+                c = torch.empty((m, n), dtype=torch.float16, device="cuda")
+
+                def run():
+                    matmul(a, b, cfg, out=c)
+
+                run()  # exclude compilation
+                torch.cuda.synchronize()
+                st_before = gpu_state()
+                primary = bench_median(run)
+                _, p50, _ = bench_quantiles(run)
+                st_after = gpu_state()
+
+                rows.append({
+                    "label": case.label, "m": m, "n": n, "k": k,
+                    "block_m": cfg.block_m, "block_n": cfg.block_n,
+                    "block_k": cfg.block_k, "num_warps": cfg.num_warps,
+                    "num_stages": cfg.num_stages, "repeat": r,
+                    "primary_median_ms": primary,
+                    "quantile_p50_ms": p50,
+                    "median_minus_p50_ms": primary - p50,
+                    "tflops_primary": tflops(m, n, k, primary),
+                    "sm_clock_mhz_before": st_before["sm_clock_mhz"],
+                    "sm_clock_mhz_after": st_after["sm_clock_mhz"],
+                    "temperature_c_before": st_before["temperature_c"],
+                    "temperature_c_after": st_after["temperature_c"],
+                })
+                torch.cuda.empty_cache()
+    return rows
+
+
+_REPEAT_FIELDS = [
+    "label", "m", "n", "k", "block_m", "block_n", "block_k", "num_warps",
+    "num_stages", "repeat", "primary_median_ms", "quantile_p50_ms",
+    "median_minus_p50_ms", "tflops_primary",
+    "sm_clock_mhz_before", "sm_clock_mhz_after",
+    "temperature_c_before", "temperature_c_after",
+]
+
+
+def write_repeat_csv(rows, path="results/benchmarks_repeat.csv"):
+    """Write the repeatability rows to a SEPARATE CSV (preserves run 1)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_REPEAT_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key) for key in _REPEAT_FIELDS})
+    return path
+
+
+def summarize_repeats(rows) -> list:
+    """Aggregate repeat rows into per (size, config) mean/min/max/std."""
+    import statistics
+    groups = {}
+    for row in rows:
+        key = (row["label"], row["num_warps"])
+        groups.setdefault(key, []).append(row["primary_median_ms"])
+    summary = []
+    for (label, warps), vals in groups.items():
+        summary.append({
+            "label": label, "num_warps": warps, "repeats": len(vals),
+            "mean_ms": statistics.fmean(vals),
+            "min_ms": min(vals), "max_ms": max(vals),
+            "std_ms": statistics.pstdev(vals) if len(vals) > 1 else 0.0,
+        })
+    return summary
+
+
+def print_repeat_summary(rows) -> None:
+    """Print per-run rows + an aggregated mean/min/max/std per (size, warps)."""
+    print("Per-run (primary median vs quantile p50):")
+    print("  label        warps repeat primary_ms  p50_ms     diff_ms    "
+          "sm_clk_before sm_clk_after")
+    for r in rows:
+        print("  %-12s %-5d %-6d %-11.4f %-10.4f %-10.4f %-13s %-s" % (
+            r["label"], r["num_warps"], r["repeat"],
+            r["primary_median_ms"], r["quantile_p50_ms"], r["median_minus_p50_ms"],
+            str(r["sm_clock_mhz_before"]), str(r["sm_clock_mhz_after"])))
+    print("\nAggregated across repeats:")
+    print("  label        warps repeats mean_ms    min_ms     max_ms     std_ms")
+    for s in summarize_repeats(rows):
+        print("  %-12s %-5d %-7d %-10.4f %-10.4f %-10.4f %-10.4f" % (
+            s["label"], s["num_warps"], s["repeats"],
+            s["mean_ms"], s["min_ms"], s["max_ms"], s["std_ms"]))
+
+
+# ----------------------------------------------------------------------------
+# Phase 5: plotting (reads measured records only)
+# ----------------------------------------------------------------------------
+def _read_benchmarks_csv(path="results/benchmarks.csv"):
+    """Load benchmark rows from CSV for plotting (measured data only)."""
+    rows = []
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            rows.append(row)
+    return rows
+
+
+def plot_latency(csv_path="results/benchmarks.csv",
+                 out_path="results/latency_comparison.png"):
+    """Plot measured median latency (ms) per workload for the fastest custom
+    config vs PyTorch. Reads only observed CSV rows; nothing is fabricated."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = _read_benchmarks_csv(csv_path)
+    labels = []
+    for r in rows:
+        if r["label"] not in labels:
+            labels.append(r["label"])
+
+    def best_custom(label):
+        cand = [r for r in rows if r["label"] == label
+                and r["impl"] == "triton_custom" and r["status"] == "ok"
+                and r["latency_ms_primary_median"] not in ("", "nan")]
+        if not cand:
+            return None
+        return min(float(r["latency_ms_primary_median"]) for r in cand)
+
+    def torch_lat(label):
+        cand = [r for r in rows if r["label"] == label
+                and r["impl"] == "torch" and r["status"] == "ok"
+                and r["latency_ms_primary_median"] not in ("", "nan")]
+        if not cand:
+            return None
+        return min(float(r["latency_ms_primary_median"]) for r in cand)
+
+    custom = [best_custom(l) for l in labels]
+    torchv = [torch_lat(l) for l in labels]
+
+    x = range(len(labels))
+    w = 0.38
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar([i - w / 2 for i in x], [c or 0 for c in custom], w,
+           label="Triton (fastest config)")
+    ax.bar([i + w / 2 for i in x], [t or 0 for t in torchv], w, label="PyTorch")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_ylabel("median latency (ms)  — lower is better")
+    ax.set_title("Measured median latency: fastest Triton config vs PyTorch (T4)")
+    ax.legend()
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
+def plot_throughput(csv_path="results/benchmarks.csv",
+                    out_path="results/throughput_comparison.png"):
+    """Plot measured TFLOPS per workload for the fastest custom config vs
+    PyTorch. Reads only observed CSV rows."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = _read_benchmarks_csv(csv_path)
+    labels = []
+    for r in rows:
+        if r["label"] not in labels:
+            labels.append(r["label"])
+
+    def best_custom_tflops(label):
+        cand = [r for r in rows if r["label"] == label
+                and r["impl"] == "triton_custom" and r["status"] == "ok"
+                and r["tflops"] not in ("", "nan")]
+        if not cand:
+            return None
+        return max(float(r["tflops"]) for r in cand)
+
+    def torch_tflops(label):
+        cand = [r for r in rows if r["label"] == label
+                and r["impl"] == "torch" and r["status"] == "ok"
+                and r["tflops"] not in ("", "nan")]
+        if not cand:
+            return None
+        return max(float(r["tflops"]) for r in cand)
+
+    custom = [best_custom_tflops(l) for l in labels]
+    torchv = [torch_tflops(l) for l in labels]
+
+    x = range(len(labels))
+    w = 0.38
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar([i - w / 2 for i in x], [c or 0 for c in custom], w,
+           label="Triton (fastest config)")
+    ax.bar([i + w / 2 for i in x], [t or 0 for t in torchv], w, label="PyTorch")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.set_ylabel("effective TFLOPS  — higher is better")
+    ax.set_title("Measured throughput: fastest Triton config vs PyTorch (T4)")
+    ax.legend()
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path

@@ -150,29 +150,40 @@ Language: Python with Triton (per the confirmed stack — torch==2.11.0+cu130, t
     - _Requirements: 6.3, 6.4_
 
 - [ ] 5. Phase 4 — Manual optimization experiments (after Phase 3 verified)
-  - [ ] 5.1 Wire the six-config experiment matrix into the runner
-    - Define the config set `(64,64,32,4,2)`, `(64,64,32,8,2)`, `(128,128,32,4,2)`, `(128,128,32,8,2)`, `(128,64,32,4,2)`, `(128,64,32,8,2)`
-    - For each config over all benchmark sizes: validate correctness first, then benchmark; record skipped/failed configs with actual error type + message; never predetermine support
+
+  > **Phase 4 first-run results (observed on T4; preserved as run 1):** all 30
+  > configs executed with 0 resource/compile errors. Fastest custom config was
+  > 64x64x32 / 8 warps across all five workloads. 1024^3: 4->8 warps 1.4652 ->
+  > 0.6836 ms (~2.14x). 4096^3: 105.468 -> 51.476 ms (~2.05x). All custom
+  > configs remained SLOWER than PyTorch. 128x128 configs showed severe
+  > regressions (cause NOT attributed to spilling without evidence).
+  > A methodology-review pass (resources, GPU clock/thermal, repeatable 64x64
+  > 4-vs-8-warp comparison, median-vs-p50) is added in benchmarks.py and
+  > writes a SEPARATE results/benchmarks_repeat.csv so run 1 is never
+  > overwritten.
+
+  - [x] 5.1 Wire the six-config experiment matrix into the runner
+    - `run_benchmarks` attempts the full config set across all sizes; skipped/failed configs would record the actual error type + message; support is never predetermined (first run: 0 errors)
     - _Requirements: 4.1, 4.2, 4.3_
 
-  - [ ] 5.2 Identify fastest correct config and compare implementations
-    - From measured records, identify the fastest correct config per workload
-    - Compare initial Triton implementation vs best measured Triton config vs PyTorch using only measured records (no invented speedups)
+  - [x] 5.2 Identify fastest correct config and compare implementations
+    - Fastest correct config per workload identified from measured records (64x64x32/8-warps); initial-Triton vs best-Triton vs PyTorch compared from measured medians only (no invented speedups; custom remained slower than PyTorch)
     - _Requirements: 4.2, 4.4_
 
   - [ ] 5.3 Provide Colab cells and STOP for pasted output (Phase 4 stop point)
-    - Add notebook cell to run the full six-config experiment matrix across all sizes, append to `benchmarks.csv`/`correctness.csv`, and preview the fastest-correct-per-workload summary
-    - Emit the five-part closing report and HALT until the developer pastes observed Colab output
+    - First run already measured and pasted. Added methodology-review tooling: `gpu_state()`, `kernel_resources()` (raw register/shared/spill metadata where exposed; no spilling claim), `repeat_compare()` + `write_repeat_csv()` (separate CSV), and median-vs-p50 reporting; notebook Cell 8 runs it
+    - (Awaiting developer-pasted Colab output of Cell 8 before finalizing Phase 5 conclusions)
     - _Requirements: 6.3, 6.4_
 
 - [ ] 6. Phase 5 — Results, plots, and documentation (after Phase 4 verified)
-  - [ ] 6.1 Implement plotting helpers
-    - `plot_latency(records, path)` → `results/latency_comparison.png`
-    - `plot_throughput(records, path)` → `results/throughput_comparison.png`
-    - Plot only from measured records
+  - [x] 6.1 Implement plotting helpers
+    - `plot_latency(csv_path, out_path)` → `results/latency_comparison.png`
+    - `plot_throughput(csv_path, out_path)` → `results/throughput_comparison.png`
+    - Both read ONLY the measured `results/benchmarks.csv` (fastest custom config vs PyTorch); nothing fabricated
+    - (PNG generation awaits Cell 9 on GPU/Colab)
     - _Requirements: 5.1_
 
-  - [ ] 6.2 Finalize README.md
+  - [x] 6.2 Finalize README.md
     - Include: objective, tiled matmul theory, memory access patterns, environment, correctness methodology, benchmark methodology (primary median vs quantile p50, compilation exclusion, `num_stages=2` as a documented experimental variable), experimental configs, measured results, tradeoffs/limitations, and Colab reproduction steps
     - Attribute the Triton official matmul tutorial and document differences: row-major 1-D ordering vs grouped ordering, manual configs vs autotuning, no fused activation/epilogue, custom correctness + benchmark harness, Tesla T4-specific (CC 7.5, FP16 in / FP32 accumulate / FP16 out)
     - Clearly separate measurements from interpretations and hypotheses
