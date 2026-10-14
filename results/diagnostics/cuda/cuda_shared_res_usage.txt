@@ -1,0 +1,33 @@
+
+Fatbin elf code:
+================
+arch = sm_75
+code version = [1,8]
+host = linux
+compile_size = 64bit
+
+Resource usage:
+ Common:
+  GLOBAL:0
+
+Fatbin elf code:
+================
+arch = sm_75
+code version = [1,8]
+host = linux
+compile_size = 64bit
+
+Resource usage:
+ Common:
+  GLOBAL:0
+ Function _Z25wmma_matmul_shared_kernelPK6__halfS1_PS_iii:
+  REG:63 STACK:0 SHARED:5376 LOCAL:0 CONSTANT[0]:388 TEXTURE:0 SURFACE:0 SAMPLER:0
+
+Fatbin ptx code:
+================
+arch = sm_75
+code version = [9,0]
+host = linux
+compile_size = 64bit
+compressed
+ptxasOptions = 
