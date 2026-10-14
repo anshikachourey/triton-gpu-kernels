@@ -1,0 +1,25 @@
+# Fix GitHub (Linguist) language statistics.
+#
+# All files under results/diagnostics/ are GENERATED GPU artifacts produced by
+# the Colab diagnostic runs: NVIDIA SASS disassembly (*.sass), PTX (*.ptx),
+# Triton IR (*.ttir/*.ttgir), LLVM IR (*.llir), cubins (*.cubin), cuobjdump text
+# (*.txt), and JSON measurement dumps. They are NOT hand-written source.
+#
+# In particular, *.sass here is NVIDIA GPU SASS disassembly, which Linguist
+# misdetects as the "Sass" stylesheet language. Marking these as
+# linguist-generated removes them from the language bar and from diffs by
+# default, without deleting, renaming, or altering any file.
+#
+# This is scoped to results/diagnostics/ ONLY, so our real source is unaffected:
+#   - CUDA C++ sources live in cuda/*.cu            (still counted)
+#   - Python/Triton sources in kernels/, tests/,    (still counted)
+#     benchmarks/, cuda/*.py
+# None of those paths match the patterns below.
+
+results/diagnostics/** linguist-generated=true
+
+# Belt-and-suspenders: explicitly reclassify GPU SASS disassembly so it is never
+# reported as the "Sass" stylesheet language even if a tool ignores the
+# directory rule above. (vendored also drops it from stats.)
+results/diagnostics/**/*.sass linguist-generated=true linguist-vendored=true
+*.sass linguist-language=Text linguist-generated=true
