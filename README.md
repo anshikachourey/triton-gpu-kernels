@@ -408,6 +408,64 @@ three paths (`results/diagnostics/cuda/cuda_performance.json`):
 - All CUDA results are reported in `results/diagnostics/cuda/` and are kept
   separate from the original Triton benchmark CSVs.
 
+### Shared-memory tiling optimization (one targeted change)
+
+A second CUDA kernel (`cuda/wmma_matmul_shared.cu`) adds **cooperative
+shared-memory tiling with cross-warp reuse** on top of the WMMA path. The naive
+kernel is kept untouched as the baseline; this is an additive comparison.
+
+**What changed.** One thread block computes a 64×64 output tile with 16 warps
+(4×4), each warp owning one 16×16 sub-tile. Per K-step (BK=16) the block
+cooperatively stages A's 64×16 slice and B's 16×64 slice into padded shared
+memory **once**, then all 16 warps reuse those staged tiles: the four warps in a
+block-row share the `As` rows and the four in a block-column share the `Bs`
+columns. This replaces the baseline's redundant per-warp global re-reads of A
+and B. `__syncthreads()` barriers guard the shared tiles; it uses no async copy,
+double buffering, or pipelining.
+
+**Numerical validation (measured, same inputs).** Against the FP64→FP16
+reference: 256×256 — 0 tolerance violations, 99.7894% exact; 1024×1024 — 0
+violations, 99.3512% exact. The shared-memory and naive CUDA outputs were
+**bitwise identical** at both sizes, so the optimization did not change results.
+
+**Verified Tensor Core execution (static SASS).** The shared kernel's
+disassembly contained **4 HMMA** instructions, with **0 FFMA / 0 LDL / 0 STL**
+and shared-memory store instructions present. As elsewhere, these are **static
+disassembly counts, not runtime instruction counters**. (The HMMA count differs
+from the naive kernel's 20; a static count reflects emitted instructions in the
+inspected disassembly, not how many execute at runtime, so the two counts are
+not directly comparable as a measure of work.)
+
+**Workload-dependent performance (measured on the Tesla T4).** The outcome
+depends on size:
+
+- **256×256 — regression.** Across all five repeats the shared kernel was
+  *slower* than naive: naive ≈ 0.057–0.059 ms vs shared ≈ 0.067–0.068 ms, a
+  `naive/shared` ratio of **0.846–0.872×** (i.e. shared is ~15–18% slower). At
+  this small size the added `__syncthreads` barriers and the staging copy
+  outweigh the reduced global traffic.
+- **1024×1024 — improvement.** Excluding repeat 0 (GPU clocks were still
+  transitioning), repeats 1–4 were: shared 0.4373, 0.4219, 0.4362, 0.4246 ms vs
+  naive 0.7264, 0.6980, 0.7404, 0.7036 ms (per-repeat `naive/shared` =
+  1.661, 1.655, 1.697, 1.657×). Median steady-state latency: shared ≈ 0.4304 ms
+  vs naive ≈ 0.7150 ms, i.e. about **1.66× faster than the naive CUDA WMMA
+  kernel**. The shared kernel is still **slower than PyTorch** (≈ 0.084–0.086 ms
+  in later repeats).
+
+**Interpretation and limitations (kept careful).**
+- The ~1.66× figure is **relative to the naive CUDA baseline only**, and only at
+  1024×1024; at 256×256 the same change is a regression. We do **not** generalize
+  it, and we do **not** claim the shared kernel beats PyTorch.
+- Repeat 0 at 1024×1024 was excluded for the steady-state summary because of a
+  GPU clock transition; clocks were sampled before/after each repeat (not
+  continuously), so per-repeat ratios carry clock-drift uncertainty.
+- Static SASS counts are not runtime counters; correctness is bitwise-identical
+  to the naive kernel, so the speedup (where present) is a scheduling/memory
+  effect, not a change in the computed result.
+- Artifacts: `results/diagnostics/cuda/cuda_shared_correctness.json`,
+  `cuda_shared_performance.json`, `cuda_shared_sass.txt`,
+  `cuda_shared_res_usage.txt` — kept separate from the original data.
+
 ## Performance tradeoffs and limitations
 
 - A straightforward tiled kernel does not match cuBLAS; PyTorch was faster
@@ -495,8 +553,10 @@ kernels/matmul.py             # Triton kernel + MatmulConfig + matmul() host wra
 tests/test_matmul.py          # smoke test, correctness suite, diagnostics, FP32 check
 benchmarks/benchmark.py       # benchmarking + methodology review + plotting
 benchmarks/diagnostics.py     # read-only HW + numerical diagnostics (Triton)
-cuda/wmma_matmul.cu           # naive CUDA C++ WMMA Tensor Core kernel (extension)
-cuda/run_wmma.py              # ctypes harness: CUDA vs Triton vs PyTorch
+cuda/wmma_matmul.cu           # naive CUDA C++ WMMA Tensor Core kernel (baseline)
+cuda/wmma_matmul_shared.cu    # shared-memory tiled WMMA kernel (optimization)
+cuda/run_wmma.py              # ctypes harness: naive CUDA vs Triton vs PyTorch
+cuda/run_wmma_shared.py       # 4-way harness: shared vs naive vs Triton vs PyTorch
 notebooks/colab_runner.ipynb  # thin runner: imports modules, runs each phase
 results/                      # benchmarks.csv, correctness.csv, *.png (generated)
 results/diagnostics/          # Triton + CUDA diagnostic artifacts (generated)
